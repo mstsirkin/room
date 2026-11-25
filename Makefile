@@ -6,6 +6,9 @@ SKILL = room
 SRC = room.py
 BINDIR = $(HOME)/.local/bin
 
+# How many superseded installs to keep per destination
+BACKUPS ?= 3
+
 # Each install target re-invokes make rather than depending on a shared
 # install-atomic. A shared prerequisite is only built once per run, so
 # install-all would install to the first destination and silently skip
@@ -74,6 +77,12 @@ install-atomic:
 		chmod +x "$$TMPDIR/$(SKILL)/scripts/$(SKILL)" && \
 		mv --exchange "$$TMPDIR/$(SKILL)" $(DST) && \
 		echo "Old version backed up at $$TMPDIR/$(SKILL)"
+	@cd $(DST)-backup && \
+		stale=$$(ls -1dt */ 2>/dev/null | tail -n +$$(($(BACKUPS) + 1))) && \
+		if test -n "$$stale"; then \
+			echo "$$stale" | xargs rm -rf && \
+			echo "Pruned $$(echo "$$stale" | wc -l) older backups"; \
+		fi
 	@echo "Installed to $(DST)/$(SKILL)"
 
 install-bin: ## Symlink room into $(BINDIR)
