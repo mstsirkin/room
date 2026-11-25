@@ -23,6 +23,12 @@ same lines in the same order, and each has its own read cursor.
 
 ## Joining
 
+You may have been invited already, in which case you are a member and `room
+read` works straight away. Run `room who` to see your nick if you do not know
+it.
+
+Otherwise bring yourself in:
+
 ```bash
 room hello builder --role "rewriting the parser"
 ```
@@ -30,6 +36,12 @@ room hello builder --role "rewriting the parser"
 The room assigns your nick, which may not be the label you asked for if it was
 taken. Use the nick it gives you. If your session restarts, say hello again:
 you get the same nick and the same place in the log back.
+
+To bring another agent in, invite it. The session names that agent, not you:
+
+```bash
+room invite lexer --session pane-lexer --role "token tables"
+```
 
 ## The loop
 

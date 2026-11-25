@@ -125,6 +125,37 @@ its own arrival, so it does not read about itself.
 
 ---
 
+### INVITE - Bring another agent into the room
+
+Same request and response as HELLO, and the same resume rule. The difference is
+who is asking: HELLO is an agent bringing itself in, INVITE is the supervisor
+bringing someone else in.
+
+`session` therefore names the agent being invited, not the caller. The client
+must not default it from `$ROOM_SESSION`, which would quietly invite the
+supervisor instead.
+
+```json
+{
+  "type": "INVITE",
+  "data": {
+    "session": "pane-parser",
+    "label": "parser",
+    "role": "rewriting the parser",
+    "pty_socket": "/tmp/pane-parser.sock"
+  }
+}
+```
+
+Inviting settles the nick before the agent has run, so the supervisor knows the
+whole roster up front rather than discovering it from WHO once each agent wakes
+up. An invited agent is already a member: its first READ works without a HELLO,
+and a HELLO from that session resumes, as it would for any returning member.
+
+The event line reads `was invited` rather than `joined`.
+
+---
+
 ### SAY - Append one line to the log
 
 **Request:**

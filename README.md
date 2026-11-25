@@ -18,6 +18,8 @@ Here the supervisor says a thing once, and every agent sees it.
 - **Each member has a cursor.** `room read` returns only what is new, because
   an agent cannot remember where it got to between turns.
 - **The room assigns nicks.** You request a label, you get a unique nick back.
+  The supervisor can invite an agent before it has run, which settles its nick
+  up front instead of leaving the roster to be discovered pane by pane.
 - **A restart resumes.** Identity is the session name, not the process, so an
   agent whose session restarts keeps its nick and its place in the log instead
   of reappearing as a stranger.
@@ -40,8 +42,14 @@ interminai start --socket /tmp/pane-parser.sock -- \
         ROOM_PTY_SOCKET=/tmp/pane-parser.sock \
         claude
 
-# Each agent joins and works
-room hello parser --role "rewriting the parser"
+# Invite it in. The nick is settled now, before the agent has run,
+# so you know the roster without asking each pane.
+room invite parser --session pane-parser \
+    --role "rewriting the parser" \
+    --pty-socket /tmp/pane-parser.sock
+
+# Each agent works. An invited one is already a member; an agent that
+# was not invited brings itself in with: room hello parser
 room read
 room say "parser is done, pushed to the branch"
 room wait --timeout 240
@@ -64,7 +72,8 @@ room say "@parser drop the lookahead, we do not need it"
 | Command | |
 |---|---|
 | `room serve` | run the room (`--log`, `--cap`, `--no-daemon`) |
-| `room hello LABEL` | join, get a nick (`--role`, `--human`, `--since`, `--pty-socket`) |
+| `room invite LABEL --session S` | bring another agent in and settle its nick |
+| `room hello LABEL` | join yourself, get a nick (`--role`, `--human`, `--since`, `--pty-socket`) |
 | `room say TEXT` | append one line, seen by everyone |
 | `room read` | what is new since your cursor (`--mentions`) |
 | `room wait` | block until someone speaks (`--timeout`, `--mentions`) |

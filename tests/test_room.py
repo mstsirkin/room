@@ -179,6 +179,58 @@ class TestHello(RoomTestCase):
         self.assertEqual(result.returncode, 1)
 
 
+class TestInvite(RoomTestCase):
+    """The supervisor bringing other agents in"""
+
+    def invite(self, session, label, *extra, check=True):
+        return self.run_room('invite', label, '--session', session, *extra,
+                             check=check)
+
+    def test_settles_the_nick_before_the_agent_runs(self):
+        out = self.invite('pane-parser', 'parser', '--role', 'parser work').stdout
+        self.assertIn('invited: parser', out)
+        self.assertIn('parser work', self.run_room('who').stdout)
+
+    def test_invited_agent_is_already_a_member(self):
+        self.invite('pane-parser', 'parser')
+        self.run_room('say', 'hello there', session='pane-parser')
+
+    def test_invited_agent_hello_resumes(self):
+        self.invite('pane-parser', 'parser')
+        out = self.run_room('hello', 'otherlabel', session='pane-parser').stdout
+        self.assertIn('resumed as: parser', out)
+
+    def test_inviting_twice_is_idempotent(self):
+        self.invite('pane-parser', 'parser')
+        out = self.invite('pane-parser', 'parser').stdout
+        self.assertIn('already in the room as: parser', out)
+
+    def test_uniquifies_against_a_member_who_said_hello(self):
+        self.hello('pane-a', 'parser')
+        self.assertIn('invited: parser2', self.invite('pane-b', 'parser').stdout)
+
+    def test_announces_the_invitation_to_everyone_else(self):
+        self.hello('pane-a', 'alpha')
+        self.invite('pane-lexer', 'lexer', '--role', 'token tables')
+
+        out = self.run_room('read', session='pane-a').stdout
+        self.assertIn('lexer was invited', out)
+        self.assertIn('token tables', out)
+
+    def test_invitee_does_not_read_its_own_invitation(self):
+        self.invite('pane-parser', 'parser')
+        self.assertIn('nothing new', self.run_room('read', session='pane-parser').stdout)
+
+    def test_requires_an_explicit_session(self):
+        """It names the invitee, so it must not fall back to the caller's"""
+        env = dict(os.environ, ROOM_SOCKET=self.socket_path,
+                   ROOM_SESSION='the-supervisor')
+        result = subprocess.run([sys.executable, ROOM, 'invite', 'parser'],
+                                capture_output=True, text=True, env=env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('the-supervisor', self.run_room('who').stdout)
+
+
 class TestSayRead(RoomTestCase):
 
     def test_everyone_sees_one_line_said_once(self):

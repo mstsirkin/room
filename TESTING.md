@@ -47,6 +47,11 @@ from whoever is driving the pane.
 - **hello**: nick assignment and uniquifying, label sanitizing, resume by
   session keeping both nick and cursor, cursor placement for `--since`, reuse
   of a departed nick, missing session and bad `--since`.
+- **invite**: a nick settled before the agent runs, the invitee being a member
+  straight away, its hello resuming rather than joining again, uniquifying
+  against someone who said hello, the announcement reaching everyone else, the
+  invitee not reading its own invitation, and the refusal to fall back to the
+  caller's session.
 - **say and read**: one line seen by everyone, cursor advance, a speaker not
   reading itself back or waking itself, stdin input, membership and
   empty-message errors, the transcript reaching the log file.

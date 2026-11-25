@@ -113,7 +113,22 @@ def mentions(message, nick):
 
 
 def handle_hello(data, state):
-    """Handle HELLO request - join the room, or resume an earlier membership"""
+    """Handle HELLO request - an agent bringing itself into the room"""
+    return admit(data, state, invited=False)
+
+
+def handle_invite(data, state):
+    """Handle INVITE request - the supervisor bringing an agent in
+
+    The session here names the agent being invited, not whoever is asking.
+    Inviting settles the nick before the agent has run, so the supervisor
+    knows the roster up front instead of discovering it afterwards.
+    """
+    return admit(data, state, invited=True)
+
+
+def admit(data, state, invited):
+    """Bring a session into the room, or resume an earlier membership"""
     session = data.get('session')
     if not session:
         return {'status': 'error', 'error': 'No session given'}
@@ -171,7 +186,7 @@ def handle_hello(data, state):
         member = Member(session, nick, role, human, pty_socket, cursor)
         state.members[session] = member
 
-        description = f'{nick} joined'
+        description = f'{nick} was invited' if invited else f'{nick} joined'
         if role:
             description += f' ({role})'
         state.append('event', nick, description)
@@ -439,6 +454,8 @@ def handle_client(client_sock, state):
 
         if req_type == 'HELLO':
             response = handle_hello(req_data, state)
+        elif req_type == 'INVITE':
+            response = handle_invite(req_data, state)
         elif req_type == 'SAY':
             response = handle_say(req_data, state)
         elif req_type == 'READ':
@@ -639,6 +656,27 @@ def cmd_hello(args):
         print(f"unread: {data['unread']} (run: room read)")
 
 
+def cmd_invite(args):
+    """Invite command - bring another agent into the room"""
+    request = {
+        'type': 'INVITE',
+        'data': {
+            'session': args.session,
+            'label': args.label,
+            'role': args.role,
+            'human': args.human,
+            'pty_socket': args.pty_socket,
+            'since': args.since,
+        },
+    }
+    data = check(send_request(require(args.socket, 'socket'), request))
+
+    if data['resumed']:
+        print(f"already in the room as: {data['nick']}")
+    else:
+        print(f"invited: {data['nick']}")
+
+
 def cmd_say(args):
     """Say command - one line, seen by everyone"""
     text = args.text if args.text is not None else sys.stdin.read()
@@ -758,6 +796,22 @@ def main():
     hello_parser.add_argument('--since', default='end',
                               help='Start cursor: end, all, or a number of messages')
     hello_parser.set_defaults(func=cmd_hello)
+
+    invite_parser = subparsers.add_parser('invite', help='Bring another agent into the room')
+    invite_parser.add_argument('--socket', default=env_socket, help='Room socket path')
+    invite_parser.add_argument('label', help='Requested nick, uniquified if taken')
+    # Deliberately not defaulting to $ROOM_SESSION: this names the agent being
+    # invited, and falling back would quietly invite the caller instead.
+    invite_parser.add_argument('--session', required=True,
+                               help='Stable identity of the agent being invited')
+    invite_parser.add_argument('--role', default='', help='One line on what they will do')
+    invite_parser.add_argument('--human', action='store_true',
+                               help='This member is a human, and resets the flood cap')
+    invite_parser.add_argument('--pty-socket',
+                               help='interminai socket of their pane, for liveness')
+    invite_parser.add_argument('--since', default='end',
+                               help='Start cursor: end, all, or a number of messages')
+    invite_parser.set_defaults(func=cmd_invite)
 
     say_parser = subparsers.add_parser('say', help='Say one line to the room')
     add_member_args(say_parser)
