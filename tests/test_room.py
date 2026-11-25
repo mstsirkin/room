@@ -191,6 +191,11 @@ class TestSocketLocation(unittest.TestCase):
         )
         self.socket_path = result.stdout.split('Socket:')[1].strip()
         self.addCleanup(shutil.rmtree, self.cwd, ignore_errors=True)
+        # Stopping an already stopped room is harmless, and without this the
+        # tests that do not stop it themselves leave a daemon behind.
+        self.addCleanup(subprocess.run,
+                        [sys.executable, ROOM, 'stop', '--socket', self.socket_path],
+                        capture_output=True)
         self.assertTrue(wait_for(lambda: os.path.exists(self.socket_path)))
 
     def test_lives_under_the_working_directory(self):
