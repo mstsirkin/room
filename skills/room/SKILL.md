@@ -24,8 +24,17 @@ same lines in the same order, and each has its own read cursor.
 ## Joining
 
 You may have been invited already, in which case you are a member and `room
-read` works straight away. Run `room who` to see your nick if you do not know
-it.
+read` works straight away. You did not choose your own nick, so start with:
+
+```bash
+room who
+# you are: author
+# author    alive   unread=0  writes code
+# reviewer  alive   unread=2  reviews code
+```
+
+The other names on that list are the other agents. Do not say hello as one of
+them.
 
 Otherwise bring yourself in:
 
@@ -83,6 +92,10 @@ your context. It still advances your cursor past everything else, so you will
 not see the skipped lines later. Use plain `room read` when you need the
 whole picture.
 
+You never see your own lines back, from either `read` or `wait`. If you said
+something and then read nothing, that is working correctly, not a lost
+message. `say` already confirmed it with a sequence number.
+
 ## Who else is here
 
 ```bash
@@ -98,5 +111,8 @@ they exited, no reply is coming and you should say so rather than block.
 - Say things once. Do not repeat what another agent already said.
 - Do not acknowledge for the sake of acknowledging. "Thanks" and "sounds
   good" cost everyone a wake-up and read. Speak when you have information.
-- The room stops accepting messages after 50 in a row with no human. If you
-  hit that cap, you were almost certainly talking to another agent in a loop.
+- The room stops accepting messages after 50 in a row with no human. `room
+  who` ends with how many you have left, counting down. That is a brake on
+  runaway agent chatter, not a reason to hold back a message you need to
+  send: say what you have to say, and if you ever do hit the cap, `say` tells
+  you so plainly rather than losing anything.

@@ -553,9 +553,30 @@ class TestWho(RoomTestCase):
         self.run_room('bye', session='pane-a')
         self.assertIn('left', self.run_room('who').stdout)
 
+    def test_tells_a_member_which_one_it_is(self):
+        """An invited agent did not choose its nick and has to be told"""
+        self.run_room('invite', 'parser', '--session', 'pane-parser')
+        out = self.run_room('who', session='pane-parser').stdout
+        self.assertIn('you are: parser', out)
+
+    def test_omits_the_marker_for_a_non_member(self):
+        self.hello('pane-a', 'alpha')
+        self.assertNotIn('you are:', self.run_room('who').stdout)
+
     def test_shows_the_budget(self):
         out = self.run_room('who').stdout
-        self.assertIn(f'{self.cap}/{self.cap} before cap', out)
+        self.assertIn(f'{self.cap} more before the room pauses', out)
+
+    def test_unread_counts_what_reading_would_return(self):
+        """Two agents read the roster's count as messages they could not see"""
+        self.hello('pane-a', 'alpha')
+        self.hello('pane-b', 'beta')
+        self.run_room('read', session='pane-a')
+        self.run_room('say', 'my own line', session='pane-a')
+
+        out = self.run_room('who').stdout
+        alpha = [line for line in out.splitlines() if line.startswith('alpha')][0]
+        self.assertIn('unread=0', alpha)
 
 
 @unittest.skipUnless(os.path.exists(INTERMINAI), 'interminai not available')

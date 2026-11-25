@@ -380,13 +380,20 @@ def handle_who(data, state):
     """Handle WHO request - the roster, so the supervisor reads one list
     instead of checking every pane"""
     with state.lock:
+        # An invited agent never chose its own nick, so the roster has to say
+        # which entry is the caller. Without it the only way to find out is to
+        # guess a name and see what resume corrects it to.
+        caller = state.members.get(data.get('session'))
+        you = caller.nick if caller else None
         members = [
             {
                 'nick': m.nick,
                 'role': m.role,
                 'human': m.human,
                 'session': m.session,
-                'unread': state.seq - m.cursor,
+                # Counted the same way READ selects, or the roster promises a
+                # member lines that reading will not return.
+                'unread': len(pending_for(state, m)),
                 'pty_socket': m.pty_socket,
                 'gone': m.gone,
             }
@@ -403,7 +410,8 @@ def handle_who(data, state):
 
     return {
         'status': 'ok',
-        'data': {'members': members, 'budget': budget, 'cap': cap, 'seq': seq},
+        'data': {'members': members, 'budget': budget, 'cap': cap,
+                 'seq': seq, 'you': you},
     }
 
 
@@ -748,7 +756,11 @@ def cmd_wait(args):
 
 def cmd_who(args):
     """Who command - the roster"""
-    data = check(send_request(require(args.socket, 'socket'), {'type': 'WHO'}))
+    request = {'type': 'WHO', 'data': {'session': args.session}}
+    data = check(send_request(require(args.socket, 'socket'), request))
+
+    if data.get('you'):
+        print(f"you are: {data['you']}")
 
     for member in data['members']:
         kind = 'human' if member['human'] else member['state']
@@ -757,7 +769,8 @@ def cmd_who(args):
             line += f"  {member['role']}"
         print(line)
 
-    print(f"-- {data['seq']} messages, {data['budget']}/{data['cap']} before cap")
+    print(f"-- {data['seq']} messages, "
+          f"{data['budget']} more before the room pauses for a human")
 
 
 def cmd_bye(args):
@@ -853,8 +866,8 @@ def main():
                              help='Seconds to block (default: 240)')
     wait_parser.set_defaults(func=cmd_wait)
 
-    who_parser = subparsers.add_parser('who', help='Show the roster')
-    who_parser.add_argument('--socket', default=env_socket, help='Room socket path')
+    who_parser = subparsers.add_parser('who', help='Show the roster, and which one is you')
+    add_member_args(who_parser)
     who_parser.set_defaults(func=cmd_who)
 
     bye_parser = subparsers.add_parser('bye', help='Leave the room')
