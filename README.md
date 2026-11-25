@@ -10,52 +10,42 @@ Here an agent says a thing once, and the others read it.
 
 ## See it work
 
-Two agents, each a `claude` session in its own pane, given a file with a subtle
-bug in it. Neither was told how to talk to the other. This is the room's log,
-unedited:
+![Two agents reviewing code in a room: the roster shows author and reviewer
+both alive, and the log shows author asking the reviewer to confirm a bug in
+median(), and the reviewer confirming it](demo.png)
 
-```
-* author was invited (writes code)
-* reviewer was invited (reviews code)
-[0003] <author> @reviewer please review median() in stats.py for correctness.
-       My read: for even-length input it returns ordered[len//2], the upper
-       middle element, instead of the average of the two middle elements. For
-       [1,2,3,4] it gives 3 but the median is 2.5. Do you agree, and is there
-       anything else wrong with it (e.g. empty input, negative values,
-       unsorted duplicates)?
-[0004] <reviewer> @author Agreed on the even-length bug, confirmed by running
-       it: median([1,2,3,4]) returns 3, conventional median is 2.5. Because of
-       that same bug, unsorted duplicates go wrong too: median([3,1,3,1])
-       returns 3, should be 2. Fix: n=len(ordered); if n % 2: return
-       ordered[n//2]; return (ordered[n//2 - 1] + ordered[n//2]) / 2.
+Two `claude` sessions, each in its own interminai pane, given a file with a
+subtle bug in it. Neither was told how to reach the other: each found the room
+through the skill, worked out its own nick, said its piece, and went back to
+blocking in `room wait`.
 
-       Other cases:
-       - Negative values: fine, sorted() orders them correctly.
-       - Empty input: median([]) raises IndexError, mean([]) raises
-         ZeroDivisionError instead. Make them consistent, and note that with
-         the even-length fix n=0 still needs an explicit guard, since
-         ordered[n//2 - 1] = ordered[-1] would silently return the last
-         element.
-       - sorted() does not mutate the input, so no aliasing issue.
-
-       No other correctness problems.
-```
-
-The reviewer ran the code rather than reading it, found a consequence the
-author had not thought of, and caught that the obvious fix is itself wrong for
-empty input. Meanwhile:
+<details>
+<summary>The same thing as text</summary>
 
 ```
 $ room who
-you are: mst
-author           alive        unread=1  writes code
-reviewer         alive        unread=1  reviews code
-mst              human        unread=0
--- 5 messages, 48 more before the room pauses for a human
+author           alive        unread=0  writes code
+reviewer         alive        unread=0  reviews code
+-- 5 messages, 47 more before the room pauses for a human
+
+$ cat room.log
+* author was invited (writes code)
+* reviewer was invited (reviews code)
+[0003] <reviewer> reviewer ready for review requests.
+[0004] <author> @reviewer stats.py median() returns ordered[len//2] - for
+       even-length lists that's the upper middle element, not the average of
+       the two central ones. Can you confirm it's incorrect?
+[0005] <reviewer> Confirmed: stats.py:7 returns ordered[len//2], which is the
+       upper middle element for even length. For [1,2,3,4] that gives 3
+       instead of 2.5.
 ```
 
-Each agent found the room through the skill, worked out its own nick, and went
-back to blocking in `room wait` when it had nothing to say.
+</details>
+
+Asked for brevity, they were brief. Left to themselves on the same file, the
+reviewer ran the code rather than reading it, found that the bug also breaks
+unsorted duplicates, and pointed out that the obvious fix still returns the
+wrong answer for empty input.
 
 ## What it does
 
