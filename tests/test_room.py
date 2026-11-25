@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -179,6 +180,40 @@ class TestHello(RoomTestCase):
         self.assertEqual(result.returncode, 1)
 
 
+class TestSocketLocation(unittest.TestCase):
+    """Where serve puts the socket when no path is given"""
+
+    def setUp(self):
+        self.cwd = tempfile.mkdtemp(prefix='room-cwd-')
+        result = subprocess.run(
+            [sys.executable, ROOM, 'serve'],
+            cwd=self.cwd, capture_output=True, text=True, check=True,
+        )
+        self.socket_path = result.stdout.split('Socket:')[1].strip()
+        self.addCleanup(shutil.rmtree, self.cwd, ignore_errors=True)
+        self.assertTrue(wait_for(lambda: os.path.exists(self.socket_path)))
+
+    def test_lives_under_the_working_directory(self):
+        self.assertEqual(os.path.dirname(os.path.dirname(self.socket_path)),
+                         os.path.realpath(self.cwd))
+
+    def test_name_is_unguessable(self):
+        name = os.path.basename(os.path.dirname(self.socket_path))
+        self.assertTrue(name.startswith('.room-'))
+        self.assertGreaterEqual(len(name) - len('.room-'), 6)
+
+    def test_directory_keeps_other_users_out(self):
+        """The socket's own mode is not relied on, the directory's is"""
+        mode = stat.S_IMODE(os.stat(os.path.dirname(self.socket_path)).st_mode)
+        self.assertEqual(mode, 0o700)
+
+    def test_directory_is_removed_when_the_room_stops(self):
+        room_dir = os.path.dirname(self.socket_path)
+        subprocess.run([sys.executable, ROOM, 'stop', '--socket', self.socket_path],
+                       capture_output=True, check=True)
+        self.assertTrue(wait_for(lambda: not os.path.exists(room_dir)))
+
+
 class TestInvite(RoomTestCase):
     """The supervisor bringing other agents in"""
 
@@ -220,6 +255,14 @@ class TestInvite(RoomTestCase):
     def test_invitee_does_not_read_its_own_invitation(self):
         self.invite('pane-parser', 'parser')
         self.assertIn('nothing new', self.run_room('read', session='pane-parser').stdout)
+
+    def test_hands_back_the_environment_to_spawn_with(self):
+        """The room's name is unguessable, so the invitation has to carry it"""
+        out = self.invite('pane-parser', 'parser',
+                          '--pty-socket', '/tmp/pane.sock').stdout
+        self.assertIn(f'ROOM_SOCKET={self.socket_path}', out)
+        self.assertIn('ROOM_SESSION=pane-parser', out)
+        self.assertIn('ROOM_PTY_SOCKET=/tmp/pane.sock', out)
 
     def test_requires_an_explicit_session(self):
         """It names the invitee, so it must not fall back to the caller's"""

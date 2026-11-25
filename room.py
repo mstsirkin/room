@@ -490,7 +490,17 @@ def handle_client(client_sock, state):
             pass
 
 
-def run_daemon(socket_path, log_path, cap):
+def auto_socket_path():
+    """Make a room directory with an unguessable name under the current one
+
+    Under the working directory rather than a shared one, so a room belongs to
+    the project it is about. mkdtemp also makes it 0700, which is what keeps
+    another user on the machine from reaching the socket inside it.
+    """
+    return os.path.join(tempfile.mkdtemp(prefix='.room-', dir=os.getcwd()), 'sock')
+
+
+def run_daemon(socket_path, log_path, cap, remove_dir=False):
     """Run the daemon process"""
     import signal
     signal.signal(signal.SIGPIPE, signal.SIG_IGN)
@@ -523,6 +533,8 @@ def run_daemon(socket_path, log_path, cap):
         sock.close()
         try:
             os.unlink(socket_path)
+            if remove_dir:
+                os.rmdir(os.path.dirname(socket_path))
         except OSError:
             pass
         if log_file:
@@ -601,14 +613,14 @@ def print_messages(data):
 
 def cmd_serve(args):
     """Serve command - run the room"""
-    socket_path = args.socket or os.path.join(
-        tempfile.mkdtemp(prefix='room-'), 'sock')
+    ours = args.socket is None
+    socket_path = args.socket or auto_socket_path()
 
     if args.no_daemon:
         print(f"Socket: {socket_path}")
         print(f"PID: {os.getpid()}")
         sys.stdout.flush()
-        run_daemon(socket_path, args.log, args.cap)
+        run_daemon(socket_path, args.log, args.cap, ours)
         return
 
     pid = os.fork()
@@ -631,7 +643,7 @@ def cmd_serve(args):
         os.dup2(devnull.fileno(), 1)
         os.dup2(devnull.fileno(), 2)
 
-    run_daemon(socket_path, args.log, args.cap)
+    run_daemon(socket_path, args.log, args.cap, ours)
     os._exit(0)
 
 
@@ -669,12 +681,21 @@ def cmd_invite(args):
             'since': args.since,
         },
     }
-    data = check(send_request(require(args.socket, 'socket'), request))
+    socket_path = require(args.socket, 'socket')
+    data = check(send_request(socket_path, request))
 
     if data['resumed']:
         print(f"already in the room as: {data['nick']}")
     else:
         print(f"invited: {data['nick']}")
+
+    # The room's name is unguessable, so an invited agent cannot find it by
+    # itself. Hand back the environment that gets it in, ready to be passed
+    # to the pane.
+    env = f"ROOM_SOCKET={os.path.abspath(socket_path)} ROOM_SESSION={args.session}"
+    if args.pty_socket:
+        env += f" ROOM_PTY_SOCKET={args.pty_socket}"
+    print(f"env: {env}")
 
 
 def cmd_say(args):

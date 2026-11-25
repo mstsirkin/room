@@ -47,7 +47,10 @@ from whoever is driving the pane.
 - **hello**: nick assignment and uniquifying, label sanitizing, resume by
   session keeping both nick and cursor, cursor placement for `--since`, reuse
   of a departed nick, missing session and bad `--since`.
-- **invite**: a nick settled before the agent runs, the invitee being a member
+- **socket location**: a room directory under the working directory, with an
+  unguessable name, mode 0700, removed when the room stops.
+- **invite**: a nick settled before the agent runs, the environment handed back
+  for spawning, the invitee being a member
   straight away, its hello resuming rather than joining again, uniquifying
   against someone who said hello, the announcement reaching everyone else, the
   invitee not reading its own invitation, and the refusal to fall back to the

@@ -32,21 +32,23 @@ Here the supervisor says a thing once, and every agent sees it.
 ## Quick Start
 
 ```bash
-# Start the room
-room serve --socket /tmp/room.sock --log /tmp/room.log
+# Start the room. It picks an unguessable name under the working directory.
+room serve --log room.log
+# Socket: /scm/ai/myproject/.room-x1j08ir3/sock
 
-# Spawn each agent with the room in its environment
-interminai start --socket /tmp/pane-parser.sock -- \
-    env ROOM_SOCKET=/tmp/room.sock \
-        ROOM_SESSION=pane-parser \
-        ROOM_PTY_SOCKET=/tmp/pane-parser.sock \
-        claude
-
-# Invite it in. The nick is settled now, before the agent has run,
-# so you know the roster without asking each pane.
+# Invite an agent. The nick is settled now, before it has run, so you know
+# the roster without asking each pane. The invitation hands back the
+# environment that gets that agent in.
 room invite parser --session pane-parser \
     --role "rewriting the parser" \
     --pty-socket /tmp/pane-parser.sock
+# invited: parser
+# env: ROOM_SOCKET=/scm/ai/myproject/.room-x1j08ir3/sock ROOM_SESSION=pane-parser ...
+
+# Spawn it with exactly that environment
+interminai start --socket /tmp/pane-parser.sock -- \
+    env ROOM_SOCKET=... ROOM_SESSION=pane-parser ROOM_PTY_SOCKET=... \
+        claude
 
 # Each agent works. An invited one is already a member; an agent that
 # was not invited brings itself in with: room hello parser
@@ -62,7 +64,7 @@ room who
 Join as a human with `--human`, which resets the flood cap whenever you speak:
 
 ```bash
-export ROOM_SOCKET=/tmp/room.sock ROOM_SESSION=me
+export ROOM_SOCKET=.room-x1j08ir3/sock ROOM_SESSION=me
 room hello mst --human
 room say "@parser drop the lookahead, we do not need it"
 ```
@@ -83,6 +85,20 @@ room say "@parser drop the lookahead, we do not need it"
 | `room stop` | stop the room |
 
 `--socket` and `--session` default to `$ROOM_SOCKET` and `$ROOM_SESSION`.
+
+## Where the room lives
+
+`room serve` creates a `.room-XXXXXXXX` directory under the working directory
+and puts the socket in it, so a room belongs to the project it is about rather
+than to a shared `/tmp`. The directory is `0700`, which is what stops another
+user on the machine from reaching the socket inside it, and it is removed when
+the room stops.
+
+The name is unguessable, so an agent cannot find the room by itself. That is
+what the invitation is for: it hands back the environment that gets that agent
+in. Pass `--socket` to put the room somewhere specific instead, and note that
+a socket you place in a shared directory yourself is reachable by anyone who
+can write to it.
 
 ## Why not IRC
 

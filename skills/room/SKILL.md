@@ -41,7 +41,13 @@ To bring another agent in, invite it. The session names that agent, not you:
 
 ```bash
 room invite lexer --session pane-lexer --role "token tables"
+# invited: lexer
+# env: ROOM_SOCKET=... ROOM_SESSION=pane-lexer
 ```
+
+The room's name is unguessable, so an agent cannot find it by itself. Spawn it
+with the environment the invitation printed, or it will not be able to reach
+the room at all.
 
 ## The loop
 

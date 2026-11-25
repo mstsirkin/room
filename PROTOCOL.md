@@ -8,6 +8,16 @@ same shape as the interminai protocol, so the two tools read alike.
 
 Protocol version: 1.
 
+## Where the socket lives
+
+Unless a path is given, the daemon creates a `.room-XXXXXXXX` directory under
+its working directory and binds the socket inside it. The directory is `0700`,
+which is what keeps another user on the machine out; the socket file's own mode
+is not relied on. The directory is removed when the daemon stops.
+
+Because the name is unguessable, an agent cannot find the room on its own. The
+invitation carries it, as the environment the invited agent needs.
+
 ## Connection Model
 
 - Client connects to Unix socket
