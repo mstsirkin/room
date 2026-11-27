@@ -477,13 +477,17 @@ def handle_client(client_sock, state):
         elif req_type == 'RELEASE':
             response = handle_release(req_data, state)
         elif req_type == 'STOP':
-            state.running = False
             response = {'status': 'ok', 'data': {}}
         else:
             response = {'status': 'error', 'error': f'Unknown command: {req_type}'}
 
         response_json = json.dumps(response) + '\n'
         client_sock.sendall(response_json.encode('utf-8'))
+
+        # Only after the answer is out. Tearing the daemon down first loses
+        # the reply, and the client reports that it got no response.
+        if req_type == 'STOP':
+            state.running = False
 
     except Exception as e:
         error_response = json.dumps({'status': 'error', 'error': str(e)}) + '\n'
