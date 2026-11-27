@@ -22,8 +22,10 @@ import time
 
 PROTOCOL_VERSION = 1
 
-# Refuse to append after this many consecutive messages from non-human
-# members. Two agents will otherwise thank each other until the quota runs out.
+# Refuse to append after this many messages with no sign of the host. Two
+# agents left to themselves will thank each other until the quota runs out.
+# Anything the host does resets this, so it only bites when the room really
+# has been left running on its own.
 DEFAULT_CAP = 50
 
 # How often to look at each member's pane.
@@ -46,11 +48,11 @@ POKE_TEXT = ("There are unread messages in the room addressed to you or your "
 class Member:
     """One participant in the room"""
 
-    def __init__(self, session, nick, role, human, pty_socket, cursor):
+    def __init__(self, session, nick, role, host, pty_socket, cursor):
         self.session = session
         self.nick = nick
         self.role = role
-        self.human = human
+        self.host = host
         self.pty_socket = pty_socket
         self.cursor = cursor
         self.joined = time.time()
@@ -77,8 +79,6 @@ class Member:
         if self.gone:
             return 'left'
 
-        if self.human:
-            return 'human'
 
         if self.waits > 0:
             return 'waiting'
@@ -95,7 +95,8 @@ class Member:
 class RoomState:
     """Shared state of the room, guarded by a single lock"""
 
-    def __init__(self, socket_path, log_file, cap, poke_after=DEFAULT_POKE_AFTER):
+    def __init__(self, socket_path, log_file, cap, poke_after=DEFAULT_POKE_AFTER,
+                 host_session=None):
         self.lock = threading.Lock()
         self.socket_path = socket_path
         self.log_file = log_file
@@ -106,6 +107,10 @@ class RoomState:
         self.members = {}
         self.running = True
         self.poke_after = poke_after
+        # Whoever created the room. Not a human necessarily: in practice it is
+        # the agent that spawned the others, and it is the party accountable
+        # for what they spend.
+        self.host_session = host_session
 
     def append(self, kind, nick, text):
         """Append a line to the log and return it. Caller holds the lock."""
@@ -187,11 +192,12 @@ def admit(data, state, invited):
 
     label = sanitize_label(data.get('label') or 'agent')
     role = data.get('role') or ''
-    human = bool(data.get('human'))
     pty_socket = data.get('pty_socket')
     since = data.get('since', 'end')
 
     with state.lock:
+        host = session == state.host_session
+
         # A session that is already known is the same worker coming back, even
         # if its process restarted. Resume it: same nick, same cursor. Resetting
         # the cursor here would silently re-read or skip the room.
@@ -235,7 +241,7 @@ def admit(data, state, invited):
             except ValueError:
                 return {'status': 'error', 'error': f'Bad --since value: {since}'}
 
-        member = Member(session, nick, role, human, pty_socket, cursor)
+        member = Member(session, nick, role, host, pty_socket, cursor)
         state.members[session] = member
 
         description = f'{nick} was invited' if invited else f'{nick} joined'
@@ -272,15 +278,13 @@ def handle_say(data, state):
         if not member or member.gone:
             return {'status': 'error', 'error': 'Not in the room, say hello first'}
 
-        if member.human:
-            # A human in the room releases everyone else.
-            state.budget = state.cap
-        else:
+        if not member.host:
             if state.budget <= 0:
                 return {
                     'status': 'error',
-                    'error': f'Flood cap reached after {state.cap} messages '
-                             f'with no human. Waiting for a human, or room release.',
+                    'error': f'Flood cap reached: {state.cap} messages with no '
+                             f'sign of the host. Ask the host to run room '
+                             f'release.',
                 }
             state.budget -= 1
 
@@ -544,7 +548,7 @@ def watch_panes(state):
     while state.running:
         with state.lock:
             members = [m for m in state.members.values()
-                       if not m.gone and not m.human and m.pty_socket]
+                       if not m.gone and not m.host and m.pty_socket]
 
         # Sampled outside the lock: a hung pane must not stall the room.
         for member in members:
@@ -692,7 +696,7 @@ def handle_who(data, state):
             {
                 'nick': m.nick,
                 'role': m.role,
-                'human': m.human,
+                'host': m.host,
                 'session': m.session,
                 # Counted the same way READ selects, or the roster promises a
                 # member lines that reading will not return.
@@ -730,8 +734,20 @@ def handle_bye(data, state):
 
 
 def handle_release(data, state):
-    """Handle RELEASE request - hand the agents more turns after a flood cap"""
+    """Handle RELEASE request - hand the agents more turns after a flood cap
+
+    Only the host. An agent that can lift its own cap does not have a cap,
+    and left to themselves the agents will simply release and carry on, which
+    is the behaviour the cap exists to interrupt.
+    """
     with state.lock:
+        if state.host_session and data.get('session') != state.host_session:
+            return {
+                'status': 'error',
+                'error': 'Only the host can release the room. Say what you '
+                         'need in the room and let the host decide.',
+            }
+
         count = data.get('count') or state.cap
         state.budget = count
         state.append('event', 'room', f'released, {count} more messages')
@@ -759,6 +775,13 @@ def handle_client(client_sock, state):
         request = json.loads(data.decode('utf-8').strip())
         req_type = request.get('type')
         req_data = request.get('data') or {}
+
+        # Any sign of the host at all means the room is not running
+        # unattended, which is the only thing the cap is meant to catch.
+        # Requiring the host to speak made the cap fire during ordinary work.
+        if state.host_session and req_data.get('session') == state.host_session:
+            with state.lock:
+                state.budget = state.cap
 
         if req_type == 'HELLO':
             response = handle_hello(req_data, state)
@@ -819,13 +842,13 @@ def auto_socket_path():
 
 
 def run_daemon(socket_path, log_path, cap, remove_dir=False,
-               poke_after=DEFAULT_POKE_AFTER):
+               poke_after=DEFAULT_POKE_AFTER, host_session=None):
     """Run the daemon process"""
     import signal
     signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
     log_file = open(log_path, 'a') if log_path else None
-    state = RoomState(socket_path, log_file, cap, poke_after)
+    state = RoomState(socket_path, log_file, cap, poke_after, host_session)
 
     threading.Thread(target=watch_panes, args=(state,), daemon=True).start()
 
@@ -937,11 +960,20 @@ def cmd_serve(args):
     ours = args.socket is None
     socket_path = args.socket or auto_socket_path()
 
+    # Whoever started the room hosts it. Taken from the environment so the
+    # usual case needs no flag: the agent that runs serve is the one that
+    # goes on to invite everybody.
+    host = args.host or os.environ.get('ROOM_SESSION')
+    if not host:
+        print('Warning: no host. Pass --host or set ROOM_SESSION, or nobody '
+              'will be able to lift the flood cap.', file=sys.stderr)
+
     if args.no_daemon:
         print(f"Socket: {socket_path}")
         print(f"PID: {os.getpid()}")
         sys.stdout.flush()
-        run_daemon(socket_path, args.log, args.cap, ours, args.poke_after)
+        run_daemon(socket_path, args.log, args.cap, ours, args.poke_after,
+                   host)
         return
 
     pid = os.fork()
@@ -964,7 +996,7 @@ def cmd_serve(args):
         os.dup2(devnull.fileno(), 1)
         os.dup2(devnull.fileno(), 2)
 
-    run_daemon(socket_path, args.log, args.cap, ours, args.poke_after)
+    run_daemon(socket_path, args.log, args.cap, ours, args.poke_after, host)
     os._exit(0)
 
 
@@ -976,7 +1008,6 @@ def cmd_hello(args):
             'session': require(args.session, 'session'),
             'label': args.label,
             'role': args.role,
-            'human': args.human,
             'pty_socket': args.pty_socket,
             'since': args.since,
         },
@@ -997,7 +1028,6 @@ def cmd_invite(args):
             'session': args.session,
             'label': args.label,
             'role': args.role,
-            'human': args.human,
             'pty_socket': args.pty_socket,
             'since': args.since,
         },
@@ -1127,15 +1157,20 @@ def cmd_who(args):
     if data.get('you'):
         print(f"you are: {data['you']}")
 
+    hosted = False
     for member in data['members']:
-        kind = 'human' if member['human'] else member['state']
-        line = f"{member['nick']:<16} {kind:<12} unread={member['unread']}"
+        mark = 'host' if member['host'] else ''
+        hosted = hosted or (member['host'] and not member['gone'])
+        line = (f"{mark:<5}{member['nick']:<16} {member['state']:<10} "
+                f"unread={member['unread']}")
         if member['role']:
             line += f"  {member['role']}"
         print(line)
 
     print(f"-- {data['seq']} messages, "
-          f"{data['budget']} more before the room pauses for a human")
+          f"{data['budget']} more before the room pauses")
+    if not hosted:
+        print('-- no host in the room, so nobody can lift the cap')
 
 
 def cmd_bye(args):
@@ -1147,7 +1182,8 @@ def cmd_bye(args):
 
 def cmd_release(args):
     """Release command - let the agents talk again after a flood cap"""
-    request = {'type': 'RELEASE', 'data': {'count': args.count}}
+    request = {'type': 'RELEASE',
+               'data': {'count': args.count, 'session': args.session}}
     data = check(send_request(require(args.socket, 'socket'), request))
     print(f"budget: {data['budget']}")
 
@@ -1179,9 +1215,12 @@ def main():
     serve_parser.add_argument('--socket', default=env_socket, help='Socket path')
     serve_parser.add_argument('--log', help='Append the transcript here, for tail -f')
     serve_parser.add_argument('--cap', type=int, default=DEFAULT_CAP,
-                              help=f'Messages with no human before the room pauses '
+                              help=f'Messages with no sign of the host before the room pauses '
                                    f'(default: {DEFAULT_CAP})')
     serve_parser.add_argument('--no-daemon', action='store_true', help='Run in foreground')
+    serve_parser.add_argument('--host', metavar='SESSION',
+                              help='Session that hosts the room and may lift '
+                                   'the cap (default: $ROOM_SESSION)')
     serve_parser.add_argument('--poke-after', type=float, default=DEFAULT_POKE_AFTER,
                               metavar='SECONDS',
                               help='Wake a member that has been idle with unread '
@@ -1209,8 +1248,6 @@ def main():
     add_member_args(hello_parser)
     hello_parser.add_argument('label', help='Requested nick, uniquified if taken')
     hello_parser.add_argument('--role', default='', help='One line on what you are doing')
-    hello_parser.add_argument('--human', action='store_true',
-                              help='This member is a human, and resets the flood cap')
     hello_parser.add_argument('--pty-socket', default=env_pty,
                               help='interminai socket of this pane, for liveness')
     hello_parser.add_argument('--since', default='end',
@@ -1225,8 +1262,6 @@ def main():
     invite_parser.add_argument('--session', required=True,
                                help='Stable identity of the agent being invited')
     invite_parser.add_argument('--role', default='', help='One line on what they will do')
-    invite_parser.add_argument('--human', action='store_true',
-                               help='This member is a human, and resets the flood cap')
     invite_parser.add_argument('--pty-socket',
                                help='interminai socket of their pane, for liveness')
     invite_parser.add_argument('--since', default='end',
@@ -1275,7 +1310,7 @@ def main():
     bye_parser.set_defaults(func=cmd_bye)
 
     release_parser = subparsers.add_parser('release', help='Allow more messages after a cap')
-    release_parser.add_argument('--socket', default=env_socket, help='Room socket path')
+    add_member_args(release_parser)
     release_parser.add_argument('count', nargs='?', type=int, help='How many more')
     release_parser.set_defaults(func=cmd_release)
 

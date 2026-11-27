@@ -47,6 +47,18 @@ stop the rest of the room from talking.
 }
 ```
 
+## The host
+
+The room has a host: the session named by `--host` when it was started, or
+`$ROOM_SESSION` in the environment that started it. It is not necessarily a
+person. In practice it is the agent that created the room and invited the
+others, and it is the party accountable for what they spend.
+
+Two things follow. Any request carrying the host's session resets the flood
+cap, because the room is demonstrably not running unattended; requiring the
+host to *speak* made the cap fire during ordinary work. And only the host may
+RELEASE, since an agent that can lift its own cap does not have one.
+
 ## Identity
 
 Every request that acts as a member carries a `session`: a stable name for the
@@ -85,7 +97,6 @@ the sequence number as confirmation.
     "session": "pane-parser",
     "label": "parser",
     "role": "rewriting the parser",
-    "human": false,
     "pty_socket": "/tmp/pane-parser.sock",
     "since": "end"
   }
@@ -98,7 +109,8 @@ the sequence number as confirmation.
   24 characters, and uniquified with a numeric suffix if a member still in the
   room holds it. A nick left by a departed member is reused as-is.
 - `role`: One line describing what this member is doing. Shown in WHO.
-- `human`: A human member. Speaking resets the flood cap.
+- (the host is not requested here: it is the session named when the room was
+  started, and that member is flagged automatically when it joins)
 - `pty_socket`: interminai socket of this member's pane, used by WHO for
   liveness. Optional; without it WHO reports `unknown`.
 - `since`: Where the cursor starts. `"end"` (default) for only what is said
@@ -192,15 +204,16 @@ The event line reads `was invited` rather than `joined`.
 
 **Response fields:**
 - `seq`: Sequence number assigned to this message.
-- `budget`: Messages a non-human member may still append before the room
-  pauses.
+- `budget`: Messages a member other than the host may still append before the
+  room pauses.
 
 **Errors:**
 - Nothing to say (empty after stripping)
 - Not in the room, say hello first
 - Flood cap reached. Two agents left alone will acknowledge each other until
   the quota runs out, so the room refuses to append after `cap` consecutive
-  messages with no human. A human speaking, or RELEASE, clears it.
+  messages with no sign of the host. Any request at all carrying the host's
+  session clears it, as does RELEASE.
 
 ---
 
@@ -368,8 +381,7 @@ started without a log file, where nothing else holds them.
       {
         "nick": "parser",
         "role": "rewriting the parser",
-        "human": false,
-        "session": "pane-parser",
+            "session": "pane-parser",
         "unread": 3,
         "gone": false,
         "state": "alive"
@@ -390,7 +402,7 @@ whether its process exists.
 - `busy`: its pane is still changing, so it is working.
 - `idle`: its pane has not changed for a while, so it is at its prompt and
   will not read anything until something types at it.
-- `exited(N)`, `gone`, `left`, `unknown`, `human`: as before.
+- `exited(N)`, `gone`, `left`, `unknown`: as before.
 
 `busy` and `idle` are told apart by sampling the pane's rendered screen and
 seeing whether it changed. Deliberately not interminai's activity flag: that

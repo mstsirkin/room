@@ -43,6 +43,7 @@ class RoomTestCase(unittest.TestCase):
     """A room daemon on a private socket, torn down afterwards"""
 
     cap = 50
+    host = 'pane-host'
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix='room-test-')
@@ -51,7 +52,8 @@ class RoomTestCase(unittest.TestCase):
 
         subprocess.run(
             [sys.executable, ROOM, 'serve', '--socket', self.socket_path,
-             '--log', self.log_path, '--cap', str(self.cap)],
+             '--log', self.log_path, '--cap', str(self.cap),
+             '--host', self.host],
             check=True, capture_output=True, text=True,
         )
         self.assertTrue(
@@ -549,26 +551,38 @@ class TestFloodCap(RoomTestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn('Flood cap', result.stderr)
 
-    def test_a_human_resets_it(self):
+    def test_any_sign_of_the_host_resets_it(self):
+        """Requiring the host to speak made the cap fire during real work"""
         self.hello('pane-a', 'alpha')
-        self.hello('pane-h', 'mst', '--human')
+        self.hello(self.host, 'boss')
         for i in range(self.cap):
             self.run_room('say', f'message {i}', session='pane-a')
 
-        self.run_room('say', 'carry on', session='pane-h')
-        self.run_room('say', 'thanks', session='pane-a')
+        self.run_room('read', session=self.host)
+        self.run_room('say', 'allowed again', session='pane-a')
 
-    def test_a_human_is_never_capped(self):
-        self.hello('pane-h', 'mst', '--human')
+    def test_the_host_is_never_capped(self):
+        self.hello(self.host, 'boss')
         for i in range(self.cap * 2):
-            self.run_room('say', f'human message {i}', session='pane-h')
+            self.run_room('say', f'host message {i}', session=self.host)
+
+    def test_a_worker_cannot_release_its_own_cap(self):
+        """An agent that can lift its own cap does not have one"""
+        self.hello('pane-a', 'alpha')
+        for i in range(self.cap):
+            self.run_room('say', f'message {i}', session='pane-a')
+
+        result = self.run_room('release', session='pane-a', check=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Only the host', result.stderr)
 
     def test_release_hands_out_more_turns(self):
         self.hello('pane-a', 'alpha')
+        self.hello(self.host, 'boss')
         for i in range(self.cap):
             self.run_room('say', f'message {i}', session='pane-a')
 
-        self.run_room('release', '2')
+        self.run_room('release', '2', session=self.host)
         self.run_room('say', 'allowed again', session='pane-a')
         self.run_room('say', 'and once more', session='pane-a')
 
@@ -580,12 +594,17 @@ class TestWho(RoomTestCase):
 
     def test_lists_members_with_roles(self):
         self.hello('pane-a', 'alpha', '--role', 'parser work')
-        self.hello('pane-h', 'mst', '--human')
+        self.hello(self.host, 'boss')
 
         out = self.run_room('who').stdout
         self.assertIn('alpha', out)
         self.assertIn('parser work', out)
-        self.assertIn('human', out)
+        self.assertIn('host', out)
+
+    def test_warns_when_no_host_has_joined(self):
+        """Otherwise the cap can never be lifted and nothing says why"""
+        self.hello('pane-a', 'alpha')
+        self.assertIn('no host in the room', self.run_room('who').stdout)
 
     def test_reports_unknown_without_a_pty_socket(self):
         self.hello('pane-a', 'alpha')
@@ -622,7 +641,7 @@ class TestWho(RoomTestCase):
         self.run_room('say', 'my own line', session='pane-a')
 
         out = self.run_room('who').stdout
-        alpha = [line for line in out.splitlines() if line.startswith('alpha')][0]
+        alpha = [line for line in out.splitlines() if 'alpha' in line][0]
         self.assertIn('unread=0', alpha)
 
 
@@ -743,12 +762,12 @@ class TestLiveness(RoomTestCase):
         """The answer belongs in the log, not on a pane that scrolls"""
         pane_socket = self.start_pane('pane-a', ['cat'])
         self.hello('pane-a', 'worker', '--pty-socket', pane_socket)
-        self.hello('pane-h', 'mst', '--human')
+        self.hello(self.host, 'boss')
         self.assertTrue(wait_for(
             lambda: 'idle' in self.run_room('who').stdout, timeout=20))
 
         out = self.run_room('ask', 'worker', 'what is the status?',
-                            session='pane-h').stdout
+                            session=self.host).stdout
         self.assertIn('sent to worker', out)
         self.assertIn('woken', out)
 

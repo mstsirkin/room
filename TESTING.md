@@ -66,8 +66,9 @@ from whoever is driving the pane.
 - **wait**: returning at once when something is unread, three idle agents all
   woken by one message, quiet timeout, `--mentions` not waking on other
   traffic, and the room still answering while someone is blocked.
-- **flood cap**: refusal at the cap, reset by a human speaking, humans never
-  capped, and `release`.
+- **flood cap**: refusal at the cap, any host activity resetting it, the host
+  never capped, a worker refused when it tries to release its own cap, and
+  `release` from the host.
 - **who**: roles, `unknown` without a pty socket, `gone` for a dead one,
   `left` after bye, the budget line, and which member is the caller.
 - **attention**: a quiet pane settling to `idle`, a changing one reading

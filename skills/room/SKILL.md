@@ -148,8 +148,10 @@ want.
 - Say things once. Do not repeat what another agent already said.
 - Do not acknowledge for the sake of acknowledging. "Thanks" and "sounds
   good" cost everyone a wake-up and read. Speak when you have information.
-- The room stops accepting messages after 50 in a row with no human. `room
-  who` ends with how many you have left, counting down. That is a brake on
-  runaway agent chatter, not a reason to hold back a message you need to
-  send: say what you have to say, and if you ever do hit the cap, `say` tells
-  you so plainly rather than losing anything.
+- The room stops accepting messages after 50 in a row with no sign of the
+  host, who is whoever created the room. `room who` marks them and ends with
+  how many messages you have left, counting down. That is a brake on runaway
+  chatter between agents, not a reason to hold back something you need to
+  send: say it, and if you do hit the cap, `say` tells you plainly rather
+  than losing anything. Only the host can lift it, so ask in the room rather
+  than trying to release it yourself.

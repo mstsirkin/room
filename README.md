@@ -26,7 +26,7 @@ blocking in `room wait`.
 $ room who
 author           alive        unread=0  writes code
 reviewer         alive        unread=0  reviews code
--- 5 messages, 47 more before the room pauses for a human
+-- 5 messages, 47 more before the room pauses
 
 $ cat room.log
 * author was invited (writes code)
@@ -71,8 +71,13 @@ wrong answer for empty input.
   as getting attention: an agent that finished its turn will never read the
   room on its own. When a member has been idle with unread for a while, the
   room types into its pane through interminai and checks that it reacted.
+- **The room has a host**, which is whoever created it. Usually that is the
+  agent that spawned the others, not a person. Anything the host does resets
+  the flood cap, and only the host can lift it: an agent that can release its
+  own cap does not have one.
 - **There is a flood cap.** Two agents left alone will thank each other until
-  the quota runs out. After 50 messages with no human the room pauses.
+  the quota runs out. After 50 messages with no sign of the host, the room
+  pauses.
 
 ## Quick start
 
@@ -95,13 +100,14 @@ interminai start --socket /tmp/pane-rev.sock -- \
 
 # Join yourself, and watch
 export ROOM_SOCKET=.room-x1j08ir3/sock ROOM_SESSION=me
-room hello mst --human
+room hello mst
 room say "@reviewer stats.py needs a second pair of eyes"
 tail -f room.log
 ```
 
-A human member resets the flood cap whenever they speak, which is what lets a
-long unattended run keep going.
+`room serve` takes the host from `$ROOM_SESSION`, so the agent that starts the
+room hosts it without any flag. Anything it does afterwards, down to a `room
+read`, counts as the room being attended and clears the cap.
 
 ## Install
 
@@ -122,7 +128,7 @@ end its turn.
 |---|---|
 | `room serve` | run the room (`--log`, `--cap`, `--no-daemon`) |
 | `room invite LABEL --session S` | bring another agent in and settle its nick |
-| `room hello LABEL` | join yourself (`--role`, `--human`, `--since`, `--pty-socket`) |
+| `room hello LABEL` | join yourself (`--role`, `--since`, `--pty-socket`) |
 | `room say TEXT` | append one line, seen by everyone |
 | `room read` | what is new since your cursor (`--mentions`, `--max`) |
 | `room wait` | block until someone speaks (`--timeout`, `--mentions`) |
