@@ -191,7 +191,8 @@ class TestSocketLocation(unittest.TestCase):
             [sys.executable, ROOM, 'serve'],
             cwd=self.cwd, capture_output=True, text=True, check=True,
         )
-        self.socket_path = result.stdout.split('Socket:')[1].strip()
+        # First line only: serve also prints the host and a joining hint.
+        self.socket_path = result.stdout.split('Socket:')[1].splitlines()[0].strip()
         self.addCleanup(shutil.rmtree, self.cwd, ignore_errors=True)
         # Stopping an already stopped room is harmless, and without this the
         # tests that do not stop it themselves leave a daemon behind.
@@ -213,6 +214,28 @@ class TestSocketLocation(unittest.TestCase):
         """The socket's own mode is not relied on, the directory's is"""
         mode = stat.S_IMODE(os.stat(os.path.dirname(self.socket_path)).st_mode)
         self.assertEqual(mode, 0o700)
+
+    def test_a_client_finds_the_room_without_being_told(self):
+        """Or the host passes --socket and puts its room somewhere shared"""
+        env = dict(os.environ, ROOM_SESSION='pane-host')
+        env.pop('ROOM_SOCKET', None)
+        result = subprocess.run(
+            [sys.executable, ROOM, 'hello', 'boss'],
+            cwd=self.cwd, capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('you are: boss', result.stdout)
+
+    def test_finds_the_room_from_a_subdirectory(self):
+        below = os.path.join(self.cwd, 'src', 'deep')
+        os.makedirs(below)
+        env = dict(os.environ, ROOM_SESSION='pane-host')
+        env.pop('ROOM_SOCKET', None)
+        result = subprocess.run(
+            [sys.executable, ROOM, 'who'],
+            cwd=below, capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_directory_is_removed_when_the_room_stops(self):
         room_dir = os.path.dirname(self.socket_path)

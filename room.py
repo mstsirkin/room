@@ -11,6 +11,7 @@ history in the same order, and each member has its own read cursor.
 """
 
 import argparse
+import glob
 import json
 import os
 import socket
@@ -928,8 +929,38 @@ def send_request(socket_path, request):
                 pass
 
 
+def find_socket():
+    """Look for a room in this directory or one above it
+
+    The host has no ROOM_SOCKET: it created the room rather than being invited
+    into one, and the room's name is deliberately unguessable. Without this it
+    would have to copy the path out of serve's output into every later call,
+    and an agent asked to do that will instead pass --socket and put its room
+    somewhere predictable and shared, which is worse than what this protects.
+    """
+    directory = os.getcwd()
+    while True:
+        found = sorted(glob.glob(os.path.join(directory, '.room-*', 'sock')))
+        if len(found) == 1:
+            return found[0]
+        if len(found) > 1:
+            print('Error: several rooms here, say which with --socket:',
+                  file=sys.stderr)
+            for path in found:
+                print(f'  {path}', file=sys.stderr)
+            sys.exit(1)
+
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            return None
+        directory = parent
+
+
 def require(value, name):
     """Fail with a readable message rather than a traceback"""
+    if not value and name == 'socket':
+        value = find_socket()
+
     if not value:
         print(f"Error: no {name}. Pass --{name} or set ROOM_{name.upper()}.",
               file=sys.stderr)
@@ -970,6 +1001,7 @@ def cmd_serve(args):
 
     if args.no_daemon:
         print(f"Socket: {socket_path}")
+        print(f"Host: {host or 'none'}")
         print(f"PID: {os.getpid()}")
         sys.stdout.flush()
         run_daemon(socket_path, args.log, args.cap, ours, args.poke_after,
@@ -980,6 +1012,12 @@ def cmd_serve(args):
     if pid > 0:
         os.waitpid(pid, 0)
         print(f"Socket: {socket_path}")
+        print(f"Host: {host or 'none'}")
+        # Said here because joining under a different session is the quiet
+        # way to end up with a room nobody can release.
+        if host:
+            print(f"Join as the host with: "
+                  f"ROOM_SOCKET={socket_path} ROOM_SESSION={host} room hello <label>")
         sys.stdout.flush()
         return
 
