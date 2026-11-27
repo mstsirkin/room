@@ -285,6 +285,71 @@ returns early if the client disconnects, so a dead agent does not hold a thread.
 
 ---
 
+### POKE - Wake a member sitting at its prompt
+
+**Request:**
+```json
+{
+  "type": "POKE",
+  "data": {"nick": "parser", "steer": false, "text": null}
+}
+```
+
+Types into the member's pane through interminai, using the `pty_socket`
+recorded when it joined, and waits for the pane to react.
+
+Text and Enter are sent as two writes with a pause between them. A React/Ink
+TUI, which is what these agents are, is not ready for an Enter arriving in the
+same write, and the message lands in its input box unsent. That failure is
+silent, so the poke is only reported as successful once the pane's rendered
+screen has actually changed.
+
+A member that is `waiting` is not poked: it will see the next line the moment
+it is appended, and typing at it would only queue stray text in a pane that is
+mid tool call. A member that is `busy` is refused unless `steer` is set, which
+interrupts it. Steering works: an agent mid-task reads the new instruction and
+changes course.
+
+**Response:** `{"nick": "parser", "was": "idle", "poked": true}`
+
+---
+
+### ASK - Say something to one member and make sure it looks
+
+**Request:**
+```json
+{
+  "type": "ASK",
+  "data": {"session": "me", "nick": "parser", "text": "status?", "steer": false}
+}
+```
+
+SAY prefixed with `@nick`, then POKE. The point is that the answer comes back
+into the log and stays there, rather than onto a terminal screen that scrolls
+and has to be asked for again.
+
+**Response:** `{"seq": 14, "nick": "parser", "woken": true, "poked": true, "detail": "idle"}`
+
+---
+
+### LOG - Look back over history
+
+**Request:**
+```json
+{
+  "type": "LOG",
+  "data": {"from": 120, "to": 140, "last": 20}
+}
+```
+
+Deliberately separate from READ, and it never moves anybody's cursor. It is
+also the way back to messages a bounded READ dropped, which matters for a room
+started without a log file, where nothing else holds them.
+
+**Response:** as READ, plus the room's current `seq`.
+
+---
+
 ### WHO - The roster
 
 **Request:**
@@ -317,20 +382,28 @@ returns early if the client disconnects, so a dead agent does not hold a thread.
 }
 ```
 
-**Member states:**
-- `alive`: interminai reports the pane's process still running.
-- `exited(N)`: the process exited with status N. No reply is coming.
-- `gone`: the interminai socket could not be reached.
-- `left`: the member said BYE.
-- `unknown`: no `pty_socket` was given at HELLO.
+**Member states:** what the member is in a position to notice, not merely
+whether its process exists.
 
-Liveness is asked of interminai rather than determined here, because interminai
-owns the pty and gets SIGCHLD. The STATUS request it sends deliberately does not
-use activity mode: that would clear interminai's activity flag and steal the
-notification from whoever is driving the pane. The cost is that WHO cannot tell
-an idle agent from a thinking one.
+- `waiting`: blocked in WAIT. The room knows this for certain, because it is
+  holding that connection, and no pane needs looking at.
+- `busy`: its pane is still changing, so it is working.
+- `idle`: its pane has not changed for a while, so it is at its prompt and
+  will not read anything until something types at it.
+- `exited(N)`, `gone`, `left`, `unknown`, `human`: as before.
 
-Panes are probed outside the room lock, so a hung pane cannot stall the room.
+`busy` and `idle` are told apart by sampling the pane's rendered screen and
+seeing whether it changed. Deliberately not interminai's activity flag: that
+is set by any pty output at all, so an agent redrawing its own spinner looks
+busy forever, and reading the flag clears it, stealing the notification from
+whoever else is driving the pane. The screen works precisely because these
+TUIs animate: a thinking agent ticks a seconds counter, while one at its
+prompt redraws nothing.
+
+A watcher thread in the daemon keeps this current, so WHO is instant however
+many panes are hung, and so a room nobody is watching still makes progress.
+Members not yet sampled are probed once, on demand, so the first WHO after
+inviting everyone is accurate.
 
 ---
 

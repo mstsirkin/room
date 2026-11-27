@@ -26,6 +26,22 @@ PROTOCOL_VERSION = 1
 # members. Two agents will otherwise thank each other until the quota runs out.
 DEFAULT_CAP = 50
 
+# How often to look at each member's pane.
+WATCH_EVERY = 2.0
+
+# A pane whose screen has not changed for this long is at its prompt rather
+# than working. Agent TUIs tick a seconds counter while they think, so their
+# screen keeps changing; an idle one redraws nothing at all.
+SETTLED_AFTER = 6.0
+
+# Leave an idle member this long to read by itself before poking it, and do
+# not poke the same member again inside this window.
+DEFAULT_POKE_AFTER = 45.0
+
+POKE_TEXT = ("There are unread messages in the room addressed to you or your "
+             "work. Run: room read. Act on anything that needs you, say what "
+             "you found with room say, then go back to room wait.")
+
 
 class Member:
     """One participant in the room"""
@@ -40,11 +56,46 @@ class Member:
         self.joined = time.time()
         self.gone = False
 
+        # Pane watching. screen is the last thing the pane showed, settled is
+        # when it last changed, and waits counts the WAIT calls this member
+        # has open right now.
+        self.screen = None
+        self.settled = time.time()
+        self.liveness = 'unknown'
+        self.waits = 0
+        self.poked = 0.0
+
+    def attention(self):
+        """Whether this member is in a position to notice a new message
+
+        - waiting: blocked in room wait, so it sees the next line at once
+        - busy: its pane is still changing, so it is working and will read
+          when it is done, or can be steered
+        - idle: alive but at its prompt, which means deaf until something
+          types into its pane
+        """
+        if self.gone:
+            return 'left'
+
+        if self.human:
+            return 'human'
+
+        if self.waits > 0:
+            return 'waiting'
+
+        if self.liveness != 'alive':
+            return self.liveness
+
+        if self.screen is None:
+            return 'unknown'
+
+        return 'idle' if time.time() - self.settled >= SETTLED_AFTER else 'busy'
+
 
 class RoomState:
     """Shared state of the room, guarded by a single lock"""
 
-    def __init__(self, socket_path, log_file, cap):
+    def __init__(self, socket_path, log_file, cap, poke_after=DEFAULT_POKE_AFTER):
         self.lock = threading.Lock()
         self.socket_path = socket_path
         self.log_file = log_file
@@ -54,6 +105,7 @@ class RoomState:
         self.seq = 0
         self.members = {}
         self.running = True
+        self.poke_after = poke_after
 
     def append(self, kind, nick, text):
         """Append a line to the log and return it. Caller holds the lock."""
@@ -252,16 +304,27 @@ def pending_for(state, member):
     ]
 
 
-def collect(state, member, only_mentions):
-    """Unread messages for a member, advancing its cursor. Caller holds the lock."""
+def collect(state, member, only_mentions, limit=None):
+    """Unread messages for a member, advancing its cursor. Caller holds the lock.
+
+    limit keeps a member that has been working for an hour from being handed
+    the whole backlog at once. The dropped messages are the oldest, and they
+    stay in the log file for anyone who wants them.
+    """
     pending = pending_for(state, member)
     member.cursor = state.seq
 
+    skipped = 0
     if only_mentions:
         wanted = [m for m in pending if mentions(m, member.nick)]
-        return wanted, len(pending) - len(wanted)
+        skipped = len(pending) - len(wanted)
+        pending = wanted
 
-    return pending, 0
+    if limit and len(pending) > limit:
+        skipped += len(pending) - limit
+        pending = pending[-limit:]
+
+    return pending, skipped
 
 
 def handle_read(data, state):
@@ -274,7 +337,8 @@ def handle_read(data, state):
         if not member or member.gone:
             return {'status': 'error', 'error': 'Not in the room, say hello first'}
 
-        messages, skipped = collect(state, member, only_mentions)
+        messages, skipped = collect(state, member, only_mentions,
+                                    data.get('max'))
         return {
             'status': 'ok',
             'data': {'messages': messages, 'skipped': skipped},
@@ -292,6 +356,24 @@ def handle_wait(data, state, client_sock):
     timeout = data.get('timeout') or 240
     deadline = time.time() + timeout
 
+    # A member blocked here is the one case where the room knows for certain
+    # that it has the member's attention, so record it rather than inferring
+    # anything from its pane.
+    with state.lock:
+        waiter = state.members.get(session)
+        if waiter:
+            waiter.waits += 1
+    try:
+        return wait_loop(session, only_mentions, data.get('max'), deadline,
+                         state, client_sock)
+    finally:
+        with state.lock:
+            if waiter:
+                waiter.waits -= 1
+
+
+def wait_loop(session, only_mentions, limit, deadline, state, client_sock):
+    """Block until this member has something to read"""
     while True:
         with state.lock:
             member = state.members.get(session)
@@ -304,10 +386,11 @@ def handle_wait(data, state, client_sock):
             has_unread = bool(pending)
 
             if has_unread:
-                messages, skipped = collect(state, member, only_mentions)
+                messages, skipped = collect(state, member, only_mentions, limit)
                 return {
                     'status': 'ok',
-                    'data': {'messages': messages, 'skipped': skipped, 'timeout': False},
+                    'data': {'messages': messages, 'skipped': skipped,
+                             'timeout': False},
                 }
 
         if time.time() >= deadline:
@@ -328,46 +411,38 @@ def handle_wait(data, state, client_sock):
         time.sleep(0.1)
 
 
-def probe_pty(pty_socket):
-    """Ask interminai whether a member's pane is still alive
+def pty_request(pty_socket, request, timeout=5):
+    """Send one request to the interminai daemon owning a member's pane
 
     The room has no useful pid of its own: "room hello" is a short-lived
     subprocess of the agent's shell, not the agent. interminai owns the pty and
-    gets SIGCHLD, so it is the one that actually knows.
+    gets SIGCHLD, so it is the one that actually knows anything about it.
     """
-    if not pty_socket:
-        return 'unknown'
-
     sock = None
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(2)
+        sock.settimeout(timeout)
         sock.connect(pty_socket)
-        # Deliberately not activity mode: that clears interminai's activity
-        # flag, stealing the notification from whoever is driving the pane.
-        sock.sendall(json.dumps({'type': 'STATUS'}).encode('utf-8') + b'\n')
+        sock.sendall(json.dumps(request).encode('utf-8') + b'\n')
 
         data = b''
         while b'\n' not in data:
-            chunk = sock.recv(4096)
+            chunk = sock.recv(65536)
             if not chunk:
                 break
             data += chunk
 
         if not data:
-            return 'unknown'
+            return None
 
         response = json.loads(data.decode('utf-8').strip())
         if response.get('status') != 'ok':
-            return 'unknown'
+            return None
 
-        if response['data'].get('running'):
-            return 'alive'
-
-        return f"exited({response['data'].get('exit_code', '?')})"
+        return response.get('data', {})
 
     except (OSError, ValueError):
-        return 'gone'
+        return None
     finally:
         if sock:
             try:
@@ -376,9 +451,237 @@ def probe_pty(pty_socket):
                 pass
 
 
+def pane_screen(pty_socket):
+    """What a member's pane is showing, or None if it cannot be reached
+
+    Deliberately not interminai's activity flag. That flag is set by any pty
+    output at all, so a TUI redrawing its own spinner looks busy forever, and
+    reading it clears it, stealing the notification from whoever else is
+    driving the pane. The rendered screen says more and costs nothing.
+    """
+    if not pty_socket:
+        return None
+
+    data = pty_request(pty_socket, {'type': 'OUTPUT', 'format': 'ascii'})
+    if data is None:
+        return None
+
+    return data.get('screen', '')
+
+
+def pane_liveness(pty_socket):
+    """Whether the process in a member's pane is still running"""
+    if not pty_socket:
+        return 'unknown'
+
+    data = pty_request(pty_socket, {'type': 'STATUS'})
+    if data is None:
+        return 'gone'
+
+    if data.get('running'):
+        return 'alive'
+
+    return f"exited({data.get('exit_code', '?')})"
+
+
+def pane_submit(pty_socket, text):
+    """Type a message into a pane and submit it
+
+    Text and Enter have to be separate writes with a pause between them.
+    A React/Ink TUI, which is what these agents are, does not have its input
+    state ready for the Enter that arrives in the same write, so the message
+    lands in the box and sits there unsent. That failure is silent: the room
+    would believe it had poked an agent that never woke up.
+    """
+    if pty_request(pty_socket, {'type': 'INPUT', 'data': text}) is None:
+        return False
+
+    time.sleep(0.4)
+
+    return pty_request(pty_socket, {'type': 'INPUT', 'data': '\r'}) is not None
+
+
+def poke(state, member, text=None):
+    """Type into a member's pane so an unread message becomes a turn
+
+    This is the half the room cannot do on its own. Delivering a message is
+    not the same as getting attention: an agent sitting at its prompt will
+    never read the room, however many messages are waiting for it.
+    """
+    if not member.pty_socket:
+        return False, 'no pane recorded for this member'
+
+    member.poked = time.time()
+
+    # Taken before submitting, and kept local. Comparing against the member's
+    # shared screen would race the watcher, which may refresh it to the
+    # post-poke screen first and so hide the very change we are looking for.
+    before = pane_screen(member.pty_socket)
+
+    if not pane_submit(member.pty_socket, text or POKE_TEXT):
+        return False, 'could not reach the pane'
+
+    # Confirm the pane actually started doing something. If the Enter did not
+    # take, the message is sitting unsent in the input box and the member is
+    # still deaf, which is the failure this whole mechanism exists to remove.
+    for _ in range(20):
+        time.sleep(0.5)
+        screen = pane_screen(member.pty_socket)
+        if screen is not None and screen != before:
+            member.screen = screen
+            member.settled = time.time()
+            return True, 'woken'
+
+    return False, 'pane did not react, the text may be sitting unsent'
+
+
+def watch_panes(state):
+    """Keep each member's pane state current, and wake idle ones
+
+    Runs in the daemon so that WHO is instant and so that a room with nobody
+    watching it still makes progress.
+    """
+    while state.running:
+        with state.lock:
+            members = [m for m in state.members.values()
+                       if not m.gone and not m.human and m.pty_socket]
+
+        # Sampled outside the lock: a hung pane must not stall the room.
+        for member in members:
+            liveness = pane_liveness(member.pty_socket)
+            screen = pane_screen(member.pty_socket) if liveness == 'alive' else None
+
+            with state.lock:
+                member.liveness = liveness
+                if screen is not None and screen != member.screen:
+                    member.screen = screen
+                    member.settled = time.time()
+
+        if state.poke_after:
+            for member in members:
+                with state.lock:
+                    unread = len(pending_for(state, member))
+                    due = (unread
+                           and member.attention() == 'idle'
+                           and time.time() - member.poked >= state.poke_after)
+                if due:
+                    woken, _ = poke(state, member)
+                    if woken:
+                        with state.lock:
+                            state.append('event', 'room',
+                                         f'{member.nick} was poked, '
+                                         f'{unread} unread')
+
+        time.sleep(WATCH_EVERY)
+
+
+def handle_poke(data, state):
+    """Handle POKE request - wake a member now"""
+    with state.lock:
+        member = state.find_nick(data.get('nick'))
+        if not member or member.gone:
+            return {'status': 'error', 'error': f"No member {data.get('nick')}"}
+        attention = member.attention()
+
+    # A member blocked in wait sees the next line the moment it is appended.
+    # Typing at it would only push stray text into a pane that is mid tool
+    # call, to be submitted whenever that call returns.
+    if attention == 'waiting' and not data.get('steer'):
+        return {'status': 'ok', 'data': {'nick': member.nick, 'was': attention,
+                                         'poked': False}}
+
+    if attention == 'busy' and not data.get('steer'):
+        return {
+            'status': 'error',
+            'error': f'{member.nick} is busy. It will read when it finishes. '
+                     f'Use --steer to interrupt it anyway.',
+        }
+
+    woken, detail = poke(state, member, data.get('text'))
+    if not woken:
+        return {'status': 'error', 'error': f'{member.nick}: {detail}'}
+
+    with state.lock:
+        state.append('event', 'room', f'{member.nick} was poked')
+
+    return {'status': 'ok', 'data': {'nick': member.nick, 'was': attention,
+                                     'poked': True}}
+
+
+def handle_log(data, state):
+    """Handle LOG request - look back over history without reading it
+
+    Separate from READ on purpose. READ is about a member's own cursor and
+    moves it; this is for going back over what was said, which must not cost
+    anyone their place. It is also the way back to messages that a bounded
+    read dropped, for a room started without a log file.
+    """
+    with state.lock:
+        first = data.get('from') or 1
+        last = data.get('to') or state.seq
+        messages = [m for m in state.messages if first <= m['seq'] <= last]
+
+        tail = data.get('last')
+        if tail:
+            messages = messages[-tail:]
+
+        return {
+            'status': 'ok',
+            'data': {'messages': messages, 'skipped': 0, 'seq': state.seq},
+        }
+
+
+def handle_ask(data, state):
+    """Handle ASK request - say something to a member and make sure it looks
+
+    Asking in the room rather than in a pane is what keeps the answer. A
+    question typed into a pane gets an answer on a forty-line screen, which
+    scrolls away and then has to be asked for again.
+    """
+    nick = data.get('nick')
+    with state.lock:
+        target = state.find_nick(nick)
+        if not target or target.gone:
+            return {'status': 'error', 'error': f'No member {nick}'}
+
+    said = handle_say(dict(data, text=f'@{nick} {data.get("text", "").strip()}'),
+                      state)
+    if said['status'] != 'ok':
+        return said
+
+    poked = handle_poke(data, state)
+
+    return {
+        'status': 'ok',
+        'data': {
+            'seq': said['data']['seq'],
+            'nick': nick,
+            'woken': poked['status'] == 'ok',
+            'poked': poked.get('data', {}).get('poked', False),
+            'detail': poked.get('error') or poked['data']['was'],
+        },
+    }
+
+
 def handle_who(data, state):
     """Handle WHO request - the roster, so the supervisor reads one list
     instead of checking every pane"""
+    # A member the watcher has not reached yet would show as unknown, which
+    # is useless on the first call after inviting everyone. Probe those once,
+    # outside the lock; from then on the watcher keeps them current.
+    with state.lock:
+        fresh = [m for m in state.members.values()
+                 if m.pty_socket and not m.gone and m.liveness == 'unknown']
+
+    for member in fresh:
+        liveness = pane_liveness(member.pty_socket)
+        screen = pane_screen(member.pty_socket) if liveness == 'alive' else None
+        with state.lock:
+            member.liveness = liveness
+            if screen is not None and member.screen is None:
+                member.screen = screen
+                member.settled = time.time()
+
     with state.lock:
         # An invited agent never chose its own nick, so the roster has to say
         # which entry is the caller. Without it the only way to find out is to
@@ -394,7 +697,9 @@ def handle_who(data, state):
                 # Counted the same way READ selects, or the roster promises a
                 # member lines that reading will not return.
                 'unread': len(pending_for(state, m)),
-                'pty_socket': m.pty_socket,
+                # Answered from what the watcher already saw, so the roster
+                # is instant however many panes are hung.
+                'state': m.attention(),
                 'gone': m.gone,
             }
             for m in state.members.values()
@@ -402,11 +707,6 @@ def handle_who(data, state):
         budget = state.budget
         cap = state.cap
         seq = state.seq
-
-    # Probed outside the lock: a hung pane must not stall the room.
-    for entry in members:
-        pty_socket = entry.pop('pty_socket')
-        entry['state'] = 'left' if entry['gone'] else probe_pty(pty_socket)
 
     return {
         'status': 'ok',
@@ -470,6 +770,12 @@ def handle_client(client_sock, state):
             response = handle_read(req_data, state)
         elif req_type == 'WAIT':
             response = handle_wait(req_data, state, client_sock)
+        elif req_type == 'LOG':
+            response = handle_log(req_data, state)
+        elif req_type == 'POKE':
+            response = handle_poke(req_data, state)
+        elif req_type == 'ASK':
+            response = handle_ask(req_data, state)
         elif req_type == 'WHO':
             response = handle_who(req_data, state)
         elif req_type == 'BYE':
@@ -512,13 +818,16 @@ def auto_socket_path():
     return os.path.join(tempfile.mkdtemp(prefix='.room-', dir=os.getcwd()), 'sock')
 
 
-def run_daemon(socket_path, log_path, cap, remove_dir=False):
+def run_daemon(socket_path, log_path, cap, remove_dir=False,
+               poke_after=DEFAULT_POKE_AFTER):
     """Run the daemon process"""
     import signal
     signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
     log_file = open(log_path, 'a') if log_path else None
-    state = RoomState(socket_path, log_file, cap)
+    state = RoomState(socket_path, log_file, cap, poke_after)
+
+    threading.Thread(target=watch_panes, args=(state,), daemon=True).start()
 
     if os.path.exists(socket_path):
         os.unlink(socket_path)
@@ -632,7 +941,7 @@ def cmd_serve(args):
         print(f"Socket: {socket_path}")
         print(f"PID: {os.getpid()}")
         sys.stdout.flush()
-        run_daemon(socket_path, args.log, args.cap, ours)
+        run_daemon(socket_path, args.log, args.cap, ours, args.poke_after)
         return
 
     pid = os.fork()
@@ -655,7 +964,7 @@ def cmd_serve(args):
         os.dup2(devnull.fileno(), 1)
         os.dup2(devnull.fileno(), 2)
 
-    run_daemon(socket_path, args.log, args.cap, ours)
+    run_daemon(socket_path, args.log, args.cap, ours, args.poke_after)
     os._exit(0)
 
 
@@ -710,6 +1019,41 @@ def cmd_invite(args):
     print(f"env: {env}")
 
 
+def cmd_poke(args):
+    """Poke command - wake a member whose pane is sitting at its prompt"""
+    request = {
+        'type': 'POKE',
+        'data': {'nick': args.nick, 'steer': args.steer, 'text': args.text},
+    }
+    data = check(send_request(require(args.socket, 'socket'), request))
+    if data.get('poked'):
+        print(f"{data['nick']}: woken (was {data['was']})")
+    else:
+        print(f"{data['nick']}: already waiting, it will see it at once")
+
+
+def cmd_ask(args):
+    """Ask command - say something to one member and make sure it looks"""
+    request = {
+        'type': 'ASK',
+        'data': {
+            'session': require(args.session, 'session'),
+            'nick': args.nick,
+            'text': args.text if args.text is not None else sys.stdin.read(),
+            'steer': args.steer,
+        },
+    }
+    data = check(send_request(require(args.socket, 'socket'), request))
+
+    print(f"[{data['seq']:04d}] sent to {data['nick']}")
+    if data.get('poked'):
+        print(f"{data['nick']}: woken (was {data['detail']})")
+    elif data['woken']:
+        print(f"{data['nick']}: already waiting, it will see it at once")
+    else:
+        print(f"{data['nick']}: not woken, {data['detail']}")
+
+
 def cmd_say(args):
     """Say command - one line, seen by everyone"""
     text = args.text if args.text is not None else sys.stdin.read()
@@ -728,12 +1072,28 @@ def cmd_read(args):
         'data': {
             'session': require(args.session, 'session'),
             'mentions': args.mentions,
+            'max': args.max,
         },
     }
     data = check(send_request(require(args.socket, 'socket'), request))
 
     if not data['messages'] and not data['skipped']:
         print("nothing new")
+        return
+
+    print_messages(data)
+
+
+def cmd_log(args):
+    """Log command - look back over history without moving your cursor"""
+    request = {
+        'type': 'LOG',
+        'data': {'from': args.from_seq, 'to': args.to_seq, 'last': args.last},
+    }
+    data = check(send_request(require(args.socket, 'socket'), request))
+
+    if not data['messages']:
+        print('nothing in that range')
         return
 
     print_messages(data)
@@ -747,6 +1107,7 @@ def cmd_wait(args):
             'session': require(args.session, 'session'),
             'mentions': args.mentions,
             'timeout': args.timeout,
+            'max': args.max,
         },
     }
     data = check(send_request(require(args.socket, 'socket'), request))
@@ -821,7 +1182,28 @@ def main():
                               help=f'Messages with no human before the room pauses '
                                    f'(default: {DEFAULT_CAP})')
     serve_parser.add_argument('--no-daemon', action='store_true', help='Run in foreground')
+    serve_parser.add_argument('--poke-after', type=float, default=DEFAULT_POKE_AFTER,
+                              metavar='SECONDS',
+                              help='Wake a member that has been idle with unread '
+                                   f'this long (default: {DEFAULT_POKE_AFTER:g}, '
+                                   '0 to never)')
     serve_parser.set_defaults(func=cmd_serve)
+
+    poke_parser = subparsers.add_parser('poke', help='Wake a member sitting at its prompt')
+    poke_parser.add_argument('--socket', default=env_socket, help='Room socket path')
+    poke_parser.add_argument('nick', help='Who to wake')
+    poke_parser.add_argument('--text', help='What to type, instead of the usual nudge')
+    poke_parser.add_argument('--steer', action='store_true',
+                             help='Interrupt them even if they are busy working')
+    poke_parser.set_defaults(func=cmd_poke)
+
+    ask_parser = subparsers.add_parser('ask', help='Say something to one member and wake them')
+    add_member_args(ask_parser)
+    ask_parser.add_argument('nick', help='Who to ask')
+    ask_parser.add_argument('text', nargs='?', help='The question (default: stdin)')
+    ask_parser.add_argument('--steer', action='store_true',
+                            help='Interrupt them even if they are busy working')
+    ask_parser.set_defaults(func=cmd_ask)
 
     hello_parser = subparsers.add_parser('hello', help='Join the room')
     add_member_args(hello_parser)
@@ -860,6 +1242,8 @@ def main():
     add_member_args(read_parser)
     read_parser.add_argument('--mentions', action='store_true',
                              help='Only lines addressing you, cursor still advances')
+    read_parser.add_argument('--max', type=int, metavar='N',
+                             help='At most N messages, keeping the newest')
     read_parser.set_defaults(func=cmd_read)
 
     wait_parser = subparsers.add_parser('wait', help='Block until something is said')
@@ -868,7 +1252,19 @@ def main():
                              help='Only wake for lines addressing you')
     wait_parser.add_argument('--timeout', type=int, default=240,
                              help='Seconds to block (default: 240)')
+    wait_parser.add_argument('--max', type=int, metavar='N',
+                             help='At most N messages, keeping the newest')
     wait_parser.set_defaults(func=cmd_wait)
+
+    log_parser = subparsers.add_parser('log', help='Look back over history, cursor untouched')
+    log_parser.add_argument('--socket', default=env_socket, help='Room socket path')
+    log_parser.add_argument('--from', type=int, dest='from_seq', metavar='N',
+                            help='First sequence number to show')
+    log_parser.add_argument('--to', type=int, dest='to_seq', metavar='N',
+                            help='Last sequence number to show')
+    log_parser.add_argument('--last', type=int, metavar='N',
+                            help='Only the last N of the range')
+    log_parser.set_defaults(func=cmd_log)
 
     who_parser = subparsers.add_parser('who', help='Show the roster, and which one is you')
     add_member_args(who_parser)

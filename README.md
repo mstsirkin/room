@@ -63,9 +63,14 @@ wrong answer for empty input.
 - **A restart resumes.** Identity is the session, not the process, so an agent
   whose session restarts keeps its nick and its place in the log instead of
   reappearing as a stranger.
-- **Liveness comes from interminai**, which owns the pty and knows when the
-  agent died. `room who` reports `alive`, `exited(N)` or `left`, so nobody
-  waits forever on a reply from a process that is gone.
+- **The roster reports attention, not just liveness.** `waiting` (blocked in
+  `room wait`), `busy` (still working), `idle` (at its prompt, so deaf),
+  `exited(N)`, `left`. That is the question you actually have when a message
+  goes unanswered, and answering it is what stops you reading panes.
+- **The room wakes idle members itself.** Delivering a message is not the same
+  as getting attention: an agent that finished its turn will never read the
+  room on its own. When a member has been idle with unread for a while, the
+  room types into its pane through interminai and checks that it reacted.
 - **There is a flood cap.** Two agents left alone will thank each other until
   the quota runs out. After 50 messages with no human the room pauses.
 
@@ -119,9 +124,12 @@ end its turn.
 | `room invite LABEL --session S` | bring another agent in and settle its nick |
 | `room hello LABEL` | join yourself (`--role`, `--human`, `--since`, `--pty-socket`) |
 | `room say TEXT` | append one line, seen by everyone |
-| `room read` | what is new since your cursor (`--mentions`) |
+| `room read` | what is new since your cursor (`--mentions`, `--max`) |
 | `room wait` | block until someone speaks (`--timeout`, `--mentions`) |
-| `room who` | the roster, with liveness, and which member is you |
+| `room ask NICK TEXT` | say it to one member and wake them (`--steer`) |
+| `room poke NICK` | wake a member sitting at its prompt (`--text`, `--steer`) |
+| `room log` | look back over history, cursor untouched (`--from`, `--to`, `--last`) |
+| `room who` | the roster, with attention state, and which member is you |
 | `room bye` | leave |
 | `room release [N]` | allow more messages after a flood cap |
 | `room stop` | stop the room |

@@ -358,6 +358,48 @@ class TestSayRead(RoomTestCase):
         self.assertIn('for the log', contents)
 
 
+class TestBacklog(RoomTestCase):
+    """An agent back after an hour must not be handed the whole room"""
+
+    def setUp(self):
+        super().setUp()
+        self.hello('pane-a', 'alpha')
+        self.hello('pane-b', 'beta')
+        self.run_room('read', session='pane-b')
+        for i in range(6):
+            self.run_room('say', f'message {i}', session='pane-a')
+
+    def test_read_max_keeps_the_newest(self):
+        out = self.run_room('read', '--max', '2', session='pane-b').stdout
+        self.assertIn('message 5', out)
+        self.assertIn('message 4', out)
+        self.assertNotIn('message 0', out)
+
+    def test_read_max_says_what_it_dropped(self):
+        out = self.run_room('read', '--max', '2', session='pane-b').stdout
+        self.assertIn('4 other messages skipped', out)
+
+    def test_log_recovers_what_a_bounded_read_dropped(self):
+        """Without this the dropped messages are gone unless --log was used"""
+        self.run_room('read', '--max', '2', session='pane-b')
+        out = self.run_room('log', '--last', '6').stdout
+        self.assertIn('message 0', out)
+
+    def test_log_does_not_move_a_cursor(self):
+        self.run_room('log', '--last', '6')
+        self.assertIn('message 0', self.run_room('read', session='pane-b').stdout)
+
+    def test_log_takes_a_range(self):
+        out = self.run_room('log', '--from', '4', '--to', '5').stdout
+        self.assertIn('message 1', out)
+        self.assertIn('message 2', out)
+        self.assertNotIn('message 3', out)
+
+    def test_log_reports_an_empty_range(self):
+        self.assertIn('nothing in that range',
+                      self.run_room('log', '--from', '900').stdout)
+
+
 class TestMentions(RoomTestCase):
 
     def test_filters_to_lines_addressing_you(self):
@@ -601,11 +643,12 @@ class TestLiveness(RoomTestCase):
                         capture_output=True)
         return pane_socket
 
-    def test_reports_alive_then_exited(self):
+    def test_reports_a_live_pane_then_exited(self):
         pane_socket = self.start_pane('pane-a', ['sleep', '60'])
         self.hello('pane-a', 'worker', '--pty-socket', pane_socket)
 
-        self.assertIn('alive', self.run_room('who').stdout)
+        out = self.run_room('who').stdout
+        self.assertTrue(any(s in out for s in ('busy', 'idle', 'waiting')), out)
 
         subprocess.run(
             [sys.executable, INTERMINAI, 'kill', '--socket', pane_socket,
@@ -615,6 +658,102 @@ class TestLiveness(RoomTestCase):
         self.assertTrue(wait_for(
             lambda: 'exited' in self.run_room('who').stdout))
         self.assertIn('exited(137)', self.run_room('who').stdout)
+
+    def test_settles_to_idle_when_the_pane_stops_changing(self):
+        """A pane at its prompt renders identically, a working one ticks"""
+        pane_socket = self.start_pane('pane-a', ['sleep', '120'])
+        self.hello('pane-a', 'worker', '--pty-socket', pane_socket)
+
+        self.assertTrue(
+            wait_for(lambda: 'idle' in self.run_room('who').stdout, timeout=20),
+            'a quiet pane never settled to idle',
+        )
+
+    def test_reports_waiting_while_a_member_blocks_in_wait(self):
+        """The one state the room knows for certain, without looking at a pane"""
+        pane_socket = self.start_pane('pane-a', ['sleep', '120'])
+        self.hello('pane-a', 'worker', '--pty-socket', pane_socket)
+
+        waiter = subprocess.Popen(
+            [sys.executable, ROOM, 'wait', '--timeout', '20'],
+            env=dict(os.environ, ROOM_SOCKET=self.socket_path,
+                     ROOM_SESSION='pane-a'),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(waiter.kill)
+
+        self.assertTrue(
+            wait_for(lambda: 'waiting' in self.run_room('who').stdout),
+            'a blocked member was not reported as waiting',
+        )
+
+    def test_poke_wakes_an_idle_pane(self):
+        """Text and Enter have to be separate writes or nothing is submitted"""
+        pane_socket = self.start_pane('pane-a', ['cat'])
+        self.hello('pane-a', 'worker', '--pty-socket', pane_socket)
+        self.assertTrue(wait_for(
+            lambda: 'idle' in self.run_room('who').stdout, timeout=20))
+
+        out = self.run_room('poke', 'worker', '--text', 'ROOM-POKE-MARKER').stdout
+        self.assertIn('woken', out)
+
+        screen = subprocess.run(
+            [sys.executable, INTERMINAI, 'output', '--socket', pane_socket,
+             '--no-color'],
+            check=True, capture_output=True, text=True).stdout
+        # cat echoes the line back only once Enter has actually been sent
+        self.assertGreaterEqual(screen.count('ROOM-POKE-MARKER'), 2, screen)
+
+    def test_poke_refuses_a_busy_member_unless_steering(self):
+        pane_socket = self.start_pane(
+            'pane-a', ['bash', '-c', 'while :; do date; sleep 1; done'])
+        self.hello('pane-a', 'worker', '--pty-socket', pane_socket)
+        self.assertTrue(wait_for(
+            lambda: 'busy' in self.run_room('who').stdout, timeout=20))
+
+        result = self.run_room('poke', 'worker', check=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('busy', result.stderr)
+
+    def test_does_not_poke_a_member_that_is_already_waiting(self):
+        """Typing at a blocked member only queues stray text in its pane"""
+        pane_socket = self.start_pane('pane-a', ['cat'])
+        self.hello('pane-a', 'worker', '--pty-socket', pane_socket)
+
+        waiter = subprocess.Popen(
+            [sys.executable, ROOM, 'wait', '--timeout', '25'],
+            env=dict(os.environ, ROOM_SOCKET=self.socket_path,
+                     ROOM_SESSION='pane-a'),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(waiter.kill)
+        self.assertTrue(wait_for(
+            lambda: 'waiting' in self.run_room('who').stdout))
+
+        out = self.run_room('poke', 'worker', '--text', 'SHOULD-NOT-APPEAR').stdout
+        self.assertIn('already waiting', out)
+
+        screen = subprocess.run(
+            [sys.executable, INTERMINAI, 'output', '--socket', pane_socket,
+             '--no-color'],
+            check=True, capture_output=True, text=True).stdout
+        self.assertNotIn('SHOULD-NOT-APPEAR', screen)
+
+    def test_ask_says_it_in_the_room_and_wakes_them(self):
+        """The answer belongs in the log, not on a pane that scrolls"""
+        pane_socket = self.start_pane('pane-a', ['cat'])
+        self.hello('pane-a', 'worker', '--pty-socket', pane_socket)
+        self.hello('pane-h', 'mst', '--human')
+        self.assertTrue(wait_for(
+            lambda: 'idle' in self.run_room('who').stdout, timeout=20))
+
+        out = self.run_room('ask', 'worker', 'what is the status?',
+                            session='pane-h').stdout
+        self.assertIn('sent to worker', out)
+        self.assertIn('woken', out)
+
+        self.assertIn('@worker what is the status?',
+                      self.run_room('log', '--last', '5').stdout)
 
     def test_does_not_clear_the_activity_flag(self):
         """Probing liveness must not steal interminai's activity notification"""

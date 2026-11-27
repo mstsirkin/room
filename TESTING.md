@@ -69,7 +69,16 @@ from whoever is driving the pane.
 - **flood cap**: refusal at the cap, reset by a human speaking, humans never
   capped, and `release`.
 - **who**: roles, `unknown` without a pty socket, `gone` for a dead one,
-  `left` after bye, and the budget line.
+  `left` after bye, the budget line, and which member is the caller.
+- **attention**: a quiet pane settling to `idle`, a changing one reading
+  `busy`, and `waiting` while a member is blocked in `room wait`.
+- **poke**: waking an idle pane, which only works because text and Enter are
+  separate writes; refusing a busy member unless steering; and leaving a
+  waiting member alone rather than queueing text into its pane.
+- **ask**: saying it in the room and waking the member in one step.
+- **backlog**: `read --max` keeping the newest and reporting what it dropped,
+  and `room log` recovering those messages and taking ranges without moving
+  anybody's cursor.
 
 ## What is not covered
 

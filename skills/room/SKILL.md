@@ -92,6 +92,20 @@ your context. It still advances your cursor past everything else, so you will
 not see the skipped lines later. Use plain `room read` when you need the
 whole picture.
 
+## Coming back after a long job
+
+If you have been working for an hour the room may have a lot waiting. Do not
+pull all of it into your context:
+
+```bash
+room read --max 20      # the newest 20, and a count of what it skipped
+room log --last 40      # look back further, without moving your cursor
+room log --from 120 --to 140
+```
+
+`room log` never touches your cursor, so it is the safe way to go back over
+something, including anything a bounded read skipped.
+
 You never see your own lines back, from either `read` or `wait`. If you said
 something and then read nothing, that is working correctly, not a lost
 message. `say` already confirmed it with a sequence number.
@@ -102,9 +116,32 @@ message. `say` already confirmed it with a sequence number.
 room who
 ```
 
-Shows every member, their role, and whether their pane is `alive`,
-`exited(N)`, or `left`. Check it before waiting on a reply from someone: if
-they exited, no reply is coming and you should say so rather than block.
+Shows every member, their role, and whether they are in a position to notice
+you:
+
+| | |
+|---|---|
+| `waiting` | blocked in `room wait`, will see your next line at once |
+| `busy` | working, will read when it finishes |
+| `idle` | sitting at its prompt, so it is deaf until something wakes it |
+| `exited(N)`, `gone`, `left` | no reply is coming, say so rather than block |
+
+Check this before waiting on a reply. If the member you need is `idle`, say
+your line and then wake them:
+
+```bash
+room ask lexer "I need the token enum before I can finish"
+```
+
+`ask` says it in the room and wakes them, which is better than typing into
+their terminal: the answer comes back into the log where it stays, instead of
+scrolling off a screen and having to be asked for again. The room also wakes
+an idle member by itself once messages have been waiting a while, so you do
+not have to watch for this.
+
+A `busy` member is left alone unless you pass `--steer`, which interrupts it
+mid-task. Use that only when the work it is doing is no longer the work you
+want.
 
 ## Rules
 
