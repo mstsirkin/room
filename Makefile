@@ -1,4 +1,4 @@
-.PHONY: help install install-all install-agents install-skill install-bin
+.PHONY: help install install-all install-agents install-skill install-bin deduplicate migrate-to-agents uninstall-legacy
 .PHONY: install-claude install-codex install-cursor install-gemini
 .PHONY: install-tool install-atomic uninstall test clean
 
@@ -17,12 +17,12 @@ BACKUPS ?= 3
 help:
 	@echo "Targets:"
 	@echo "  make install              - Install the skill to ~/.agents/skills (default)"
-	@echo "  make install-all          - Install everywhere: ~/.agents, each agent, and $(BINDIR)"
+	@echo "  make install-all          - Install to ~/.agents/skills + local copy + $(BINDIR)"
 	@echo "  make install-agents       - Install to ~/.agents/skills, shared by every agent"
-	@echo "  make install-claude       - Install to every ~/.claude* profile"
-	@echo "  make install-codex        - Install to every ~/.codex* profile"
-	@echo "  make install-cursor       - Install to every ~/.cursor* profile"
-	@echo "  make install-gemini       - Install to every ~/.gemini* profile"
+	@echo "  make install-claude       - Install to every ~/.claude* profile (legacy)"
+	@echo "  make install-codex        - Install to every ~/.codex* profile (legacy)"
+	@echo "  make install-cursor       - Install to every ~/.cursor* profile (legacy)"
+	@echo "  make install-gemini       - Install to every ~/.gemini* profile (legacy)"
 	@echo "  make install-skill        - Install to agent/skills in this repo"
 	@echo "  make install-bin          - Symlink room into $(BINDIR), so agents can type 'room'"
 	@echo "  make uninstall            - Remove every installed copy"
@@ -31,12 +31,9 @@ help:
 
 install: install-agents ## Install to ~/.agents/skills
 
-install-all: ## Install to every location
+install-all: ## Install to ~/.agents/skills + local copy + bin
 	@$(MAKE) --no-print-directory install-agents
-	@$(MAKE) --no-print-directory install-claude
-	@$(MAKE) --no-print-directory install-codex
-	@$(MAKE) --no-print-directory install-cursor
-	@$(MAKE) --no-print-directory install-gemini
+	@$(MAKE) --no-print-directory install-skill
 	@$(MAKE) --no-print-directory install-bin
 
 install-agents: ## Install to ~/.agents/skills, shared by every agent
@@ -61,6 +58,23 @@ install-tool: ## Install to every ~/.$(TOOL)* directory
 		$(MAKE) --no-print-directory install-atomic DST="$$dir/skills" || exit 1; \
 	done; \
 	test -n "$$found" || echo "No $(HOME)/.$(TOOL)* directory, skipped"
+
+deduplicate: migrate-to-agents ## Alias for migrate-to-agents
+migrate-to-agents: ## Archive legacy per-tool installs (codex/cursor/gemini) to backup if universal exists
+	@if test -d $(HOME)/.agents/skills/$(SKILL); then \
+		for dst in $(HOME)/.codex*/skills $(HOME)/.cursor*/skills $(HOME)/.gemini*/skills; do \
+			if test -d "$$dst/$(SKILL)"; then \
+				mkdir -p "$$dst-backup"; \
+				TMPDIR=$$(mktemp -d "$$dst-backup/XXXXXX") && \
+				mv "$$dst/$(SKILL)" "$$TMPDIR/" && \
+				echo "Archived $$dst/$(SKILL) to $$TMPDIR/$(SKILL) (universal already in ~/.agents/skills)"; \
+			fi; \
+		done; \
+	else \
+		echo "No ~/.agents/skills/$(SKILL) - run 'make install' first"; \
+	fi
+
+uninstall-legacy: migrate-to-agents ## Alias for migrate-to-agents
 
 install-skill: ## Install to agent/skills in this repo
 	@$(MAKE) --no-print-directory install-atomic DST=agent/skills
